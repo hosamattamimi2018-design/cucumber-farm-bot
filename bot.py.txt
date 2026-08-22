@@ -4,6 +4,7 @@ import datetime
 import re
 import uuid
 import threading
+import urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -19,17 +20,38 @@ from telegram.ext import (
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-# مكتبات توليد الـ PDF ودعم اللغة العربية
+# مكتبات توليد الـ PDF ودعم الخطوط واللغة العربية
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 import arabic_reshaper
 from bidi.algorithm import get_display
 
 
 # =========================================================
-# خادم ويب وهمي بسيط لتجاوز فحص المنفذ (Port) في Render
+# تنزيل وتهيئة الخط العربي للـ PDF
+# =========================================================
+
+ARABIC_FONT_PATH = "Amiri-Regular.ttf"
+if not os.path.exists(ARABIC_FONT_PATH):
+    try:
+        font_url = "https://raw.githubusercontent.com/google/fonts/main/ofl/amiri/Amiri-Regular.ttf"
+        urllib.request.urlretrieve(font_url, ARABIC_FONT_PATH)
+    except Exception as e:
+        print(f"Error downloading font: {e}")
+
+if os.path.exists(ARABIC_FONT_PATH):
+    pdfmetrics.registerFont(TTFont('Amiri', ARABIC_FONT_PATH))
+    DEFAULT_FONT = 'Amiri'
+else:
+    DEFAULT_FONT = 'Helvetica'
+
+
+# =========================================================
+# خادم ويب وهمي بسيط لتجاوز فحص المنفذ في Render
 # =========================================================
 
 class SimpleHandler(BaseHTTPRequestHandler):
@@ -38,6 +60,11 @@ class SimpleHandler(BaseHTTPRequestHandler):
         self.send_header("Content-type", "text/plain")
         self.end_headers()
         self.wfile.write(b"Cucumber Farm Bot is running 24/7!")
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
 
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
@@ -138,7 +165,7 @@ def format_number(number):
 
 
 def format_ar_pdf(text: str) -> str:
-    """تهيئة النص العربي للطباعة في PDF بشكل صحيح"""
+    """إعادة تشكيل النص العربي وعكسه ليظهر بشكل صحيح في ملف الـ PDF"""
     reshaped_text = arabic_reshaper.reshape(str(text))
     return get_display(reshaped_text)
 
@@ -365,7 +392,7 @@ def analyze_message(text):
 
 
 # =========================================================
-# توليد تقرير PDF
+# توليد تقرير PDF مع دعم كامل للغة العربية
 # =========================================================
 
 def generate_pdf_report():
@@ -384,6 +411,7 @@ def generate_pdf_report():
     title_style = ParagraphStyle(
         name='TitleStyle',
         parent=styles['Heading1'],
+        fontName=DEFAULT_FONT,
         alignment=1,
         fontSize=18,
         spaceAfter=15,
@@ -392,8 +420,9 @@ def generate_pdf_report():
     
     normal_style = ParagraphStyle(
         name='NormalStyle',
+        fontName=DEFAULT_FONT,
         alignment=1,
-        fontSize=10,
+        fontSize=11,
         spaceAfter=10,
         textColor=colors.HexColor("#333333")
     )
@@ -422,8 +451,8 @@ def generate_pdf_report():
         ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#2e7d32")),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
         ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-        ('FONTNAME', (0, 0), (-1, -1), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, 0), 11),
+        ('FONTNAME', (0, 0), (-1, -1), DEFAULT_FONT),
+        ('FONTSIZE', (0, 0), (-1, -1), 10),
         ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
         ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
         ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor("#f1f8e9")),
@@ -432,7 +461,7 @@ def generate_pdf_report():
     elements.append(summary_table)
     elements.append(Spacer(1, 20))
 
-    # آخر 10 عمليات مسجلة
+    # آخر العمليات المسجلة
     elements.append(Paragraph(format_ar_pdf("آخر العمليات المسجلة في النظام"), title_style))
     elements.append(Spacer(1, 5))
 
@@ -463,8 +492,8 @@ def generate_pdf_report():
         ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#1565c0")),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
         ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-        ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
-        ('FONTSIZE', (0, 0), (-1, 0), 9),
+        ('FONTNAME', (0, 0), (-1, -1), DEFAULT_FONT),
+        ('FONTSIZE', (0, 0), (-1, -1), 9),
         ('GRID', (0, 0), (-1, -1), 0.5, colors.lightgrey),
         ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.whitesmoke, colors.HexColor("#e3f2fd")]),
     ]))
@@ -636,7 +665,7 @@ def get_debts():
 
 
 # =========================================================
-# القائمة الرئيسية (مع زر رابط الشيت وزر PDF)
+# القائمة الرئيسية
 # =========================================================
 
 def get_main_keyboard():
