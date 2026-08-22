@@ -1,0 +1,1439 @@
+import os
+import datetime
+import re
+import uuid
+
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters
+)
+
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+
+
+# =========================================================
+# الإعدادات
+# =========================================================
+
+BOT_TOKEN = "8943498488:AAFbsQw7oPJqqADrxYdo3k7eC1lZe5jgqm4"
+
+SPREADSHEET_URL = (
+    "https://docs.google.com/spreadsheets/d/"
+    "11ijvD8IIRjz6imUVphwav62nnCq36R6vRDa_1QhFljk/edit"
+)
+
+CREDENTIALS_FILE = "credentials.json"
+SHEET_NAME = "Sheet1"
+
+
+# =========================================================
+# الاتصال بـ Google Sheets
+# =========================================================
+
+scope = [
+    "https://spreadsheets.google.com/feeds",
+    "https://www.googleapis.com/auth/drive"
+]
+
+creds = ServiceAccountCredentials.from_json_keyfile_name(
+    CREDENTIALS_FILE,
+    scope
+)
+
+client = gspread.authorize(creds)
+
+spreadsheet = client.open_by_url(SPREADSHEET_URL)
+
+try:
+    sheet = spreadsheet.worksheet(SHEET_NAME)
+except gspread.WorksheetNotFound:
+    sheet = spreadsheet.add_worksheet(
+        title=SHEET_NAME,
+        rows=1000,
+        cols=10
+    )
+
+
+# =========================================================
+# إعداد أعمدة الجدول
+# =========================================================
+
+HEADERS = [
+    "التاريخ",
+    "النوع",
+    "الفئة",
+    "البيان / التفاصيل",
+    "المبلغ",
+    "العملة",
+    "العملية",
+    "الرصيد",
+    "الشرح",
+    "معرف العملية"
+]
+
+
+def ensure_headers():
+    first_row = sheet.row_values(1)
+
+    if not first_row:
+        sheet.append_row(HEADERS)
+    elif first_row[:len(HEADERS)] != HEADERS:
+        sheet.update(
+            "A1:J1",
+            [HEADERS]
+        )
+
+
+ensure_headers()
+
+
+# =========================================================
+# تحويل الأرقام العربية إلى إنجليزية
+# =========================================================
+
+def convert_arabic_numbers(text: str) -> str:
+    arabic_digits = "٠١٢٣٤٥٦٧٨٩"
+    english_digits = "0123456789"
+
+    table = str.maketrans(
+        arabic_digits,
+        english_digits
+    )
+
+    return text.translate(table)
+
+
+# =========================================================
+# تنسيق الأرقام
+# =========================================================
+
+def format_number(number):
+    try:
+        return f"{float(number):,.2f}"
+    except Exception:
+        return "0.00"
+
+
+# =========================================================
+# التاريخ الحالي
+# =========================================================
+
+def get_now():
+    return datetime.datetime.now()
+
+
+def get_date_string():
+    return get_now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def get_today_string():
+    return get_now().strftime("%Y-%m-%d")
+
+
+# =========================================================
+# إنشاء معرف عملية
+# =========================================================
+
+def generate_transaction_id():
+    now = get_now().strftime("%Y%m%d%H%M%S")
+    short_id = uuid.uuid4().hex[:6].upper()
+
+    return f"CUC-{now}-{short_id}"
+
+
+# =========================================================
+# تحديد العملة
+# =========================================================
+
+def detect_currency(text):
+    text = convert_arabic_numbers(text).lower()
+
+    if any(word in text for word in [
+        "سعودي",
+        "سعوديه",
+        "ريال سعودي",
+        "ر.س",
+        "رس"
+    ]):
+        return "ريال سعودي"
+
+    return "ريال يمني"
+
+
+# =========================================================
+# استخراج الأرقام
+# =========================================================
+
+def extract_numbers(text):
+    text = convert_arabic_numbers(text)
+
+    numbers = re.findall(
+        r"\d+(?:\.\d+)?",
+        text
+    )
+
+    return [float(n) for n in numbers]
+
+
+def extract_amount(text):
+    numbers = extract_numbers(text)
+
+    if not numbers:
+        return 0.0
+
+    return numbers[-1]
+
+
+# =========================================================
+# استخراج كمية الخيار
+# =========================================================
+
+def extract_quantity(text):
+    text = convert_arabic_numbers(text).lower()
+
+    match = re.search(
+        r"(\d+(?:\.\d+)?)\s*(?:كيلو|كجم|كغ|kg)",
+        text
+    )
+
+    if match:
+        return float(match.group(1))
+
+    return 0.0
+
+
+# =========================================================
+# استخراج السعر
+# =========================================================
+
+def extract_price(text):
+    text = convert_arabic_numbers(text).lower()
+
+    patterns = [
+        r"بسعر\s*(\d+(?:\.\d+)?)",
+        r"سعر\s*(\d+(?:\.\d+)?)",
+        r"السعر\s*(\d+(?:\.\d+)?)"
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, text)
+
+        if match:
+            return float(match.group(1))
+
+    return 0.0
+
+
+# =========================================================
+# حساب الرصيد
+# =========================================================
+
+def calculate_balances():
+    records = sheet.get_all_values()
+
+    balances = {
+        "ريال سعودي": 0.0,
+        "ريال يمني": 0.0
+    }
+
+    if len(records) <= 1:
+        return balances
+
+    for row in records[1:]:
+
+        if len(row) < 6:
+            continue
+
+        transaction_type = row[1].strip()
+        currency = row[5].strip()
+
+        try:
+            amount = float(
+                row[4]
+                .replace(",", "")
+                .strip()
+            )
+        except Exception:
+            continue
+
+        # الإنتاج ليس حركة مالية
+        if transaction_type == "إنتاج":
+            continue
+
+        # الآجل لا يدخل في الكاش
+        if transaction_type == "آجل / دين":
+            continue
+
+        if currency in balances:
+            balances[currency] += amount
+
+    return balances
+
+
+# =========================================================
+# الحصول على الرصيد بعد العملية
+# =========================================================
+
+def get_balance_after_transaction(currency, amount, transaction_type):
+    balances = calculate_balances()
+
+    current_balance = balances.get(currency, 0.0)
+
+    if transaction_type in ["إنتاج", "آجل / دين"]:
+        return current_balance
+
+    return current_balance + amount
+
+
+# =========================================================
+# تسجيل عملية مالية أو إنتاج
+# =========================================================
+
+def add_transaction(
+    transaction_type,
+    category,
+    details,
+    amount=0.0,
+    currency="ريال يمني",
+    operation="",
+    explanation=""
+):
+
+    date_string = get_date_string()
+    transaction_id = generate_transaction_id()
+
+    balance = get_balance_after_transaction(
+        currency,
+        amount,
+        transaction_type
+    )
+
+    row = [
+        date_string,
+        transaction_type,
+        category,
+        details,
+        amount,
+        currency,
+        operation,
+        balance,
+        explanation,
+        transaction_id
+    ]
+
+    sheet.append_row(
+        row,
+        value_input_option="USER_ENTERED"
+    )
+
+    return {
+        "date": date_string,
+        "id": transaction_id,
+        "balance": balance
+    }
+
+
+# =========================================================
+# تحليل المصروفات
+# =========================================================
+
+def detect_expense_category(text):
+
+    lower_text = convert_arabic_numbers(text).lower()
+
+    categories = {
+
+        "أسمدة ومبيدات": [
+            "سماد",
+            "يوريا",
+            "npk",
+            "بوتاسيوم",
+            "كالسيوم",
+            "مبيد",
+            "رش",
+            "مغذيات"
+        ],
+
+        "بذور وشتلات": [
+            "بذور",
+            "بذرة",
+            "شتل",
+            "شتلات"
+        ],
+
+        "عمالة وأجور": [
+            "عامل",
+            "عمال",
+            "أجرة",
+            "اجرة",
+            "راتب",
+            "رواتب"
+        ],
+
+        "مياه وري": [
+            "ماء",
+            "مياه",
+            "ري",
+            "مضخة",
+            "طرمبة"
+        ],
+
+        "وقود وطاقة": [
+            "ديزل",
+            "بنزين",
+            "وقود",
+            "غاز"
+        ],
+
+        "صيانة وشبكات ري": [
+            "صيانة",
+            "شبكة",
+            "نقاطات",
+            "خرطوم",
+            "ماسورة",
+            "مواسير"
+        ],
+
+        "تغليف وكراتين": [
+            "كرتون",
+            "كراتين",
+            "سلة",
+            "سلات",
+            "تغليف",
+            "أكياس"
+        ],
+
+        "نقل وتسويق": [
+            "نقل",
+            "سيارة",
+            "شحن",
+            "توصيل",
+            "سوق"
+        ],
+
+        "معدات وأدوات": [
+            "معدات",
+            "أداة",
+            "ادوات",
+            "مقص",
+            "ميزان"
+        ]
+    }
+
+    for category, keywords in categories.items():
+
+        if any(word in lower_text for word in keywords):
+            return category
+
+    return "مصروفات عامة"
+
+
+# =========================================================
+# تحليل الرسالة تلقائياً
+# =========================================================
+
+def analyze_message(text):
+
+    lower_text = convert_arabic_numbers(text).lower()
+
+    currency = detect_currency(text)
+
+    quantity = extract_quantity(text)
+    price = extract_price(text)
+
+    # تسجيل الإنتاج
+    if any(word in lower_text for word in [
+        "انتاج",
+        "إنتاج",
+        "حصد",
+        "حصاد"
+    ]):
+
+        if quantity <= 0:
+            quantity = extract_amount(text)
+
+        return {
+            "type": "إنتاج",
+            "category": "إنتاج محصول الخيار",
+            "amount": quantity,
+            "currency": "كيلو",
+            "operation": "إنتاج",
+            "quantity": quantity,
+            "details": text,
+            "explanation": f"تم تسجيل إنتاج {quantity} كيلو خيار"
+        }
+
+    # بيع محصول الخيار
+    if any(word in lower_text for word in [
+        "بيع",
+        "بعت",
+        "مبيعات",
+        "ايراد",
+        "إيراد",
+        "دخل",
+        "محصول"
+    ]):
+
+        if quantity > 0 and price > 0:
+            amount = quantity * price
+
+            explanation = (
+                f"بيع {quantity:,.2f} كيلو خيار "
+                f"بسعر {price:,.2f} "
+                f"للكيلو"
+            )
+
+        else:
+            amount = extract_amount(text)
+
+            explanation = "إيراد من بيع محصول الخيار"
+
+        return {
+            "type": "إيراد",
+            "category": "مبيعات محصول الخيار",
+            "amount": abs(amount),
+            "currency": currency,
+            "operation": "بيع",
+            "quantity": quantity,
+            "details": text,
+            "explanation": explanation
+        }
+
+    # دين / آجل
+    if any(word in lower_text for word in [
+        "دين",
+        "آجل",
+        "اجل",
+        "مؤجل",
+        "مؤجلة"
+    ]):
+
+        amount = extract_amount(text)
+
+        return {
+            "type": "آجل / دين",
+            "category": "ذمم وديون",
+            "amount": abs(amount),
+            "currency": currency,
+            "operation": "آجل",
+            "quantity": 0,
+            "details": text,
+            "explanation": "عملية آجل أو دين"
+        }
+
+    # مصروف
+    amount = extract_amount(text)
+
+    return {
+        "type": "مصروف",
+        "category": detect_expense_category(text),
+        "amount": -abs(amount),
+        "currency": currency,
+        "operation": "صرف",
+        "quantity": 0,
+        "details": text,
+        "explanation": "مصروف لمشروع زراعة الخيار"
+    }
+
+
+# =========================================================
+# القائمة الرئيسية
+# =========================================================
+
+def get_main_keyboard():
+
+    keyboard = [
+
+        [
+            InlineKeyboardButton(
+                "🥒 تسجيل بيع الخيار",
+                callback_data="help_sale"
+            ),
+
+            InlineKeyboardButton(
+                "⚖️ تسجيل الإنتاج",
+                callback_data="help_production"
+            )
+        ],
+
+        [
+            InlineKeyboardButton(
+                "💸 تسجيل مصروف",
+                callback_data="help_expense"
+            ),
+
+            InlineKeyboardButton(
+                "👷 أجور العمال",
+                callback_data="help_workers"
+            )
+        ],
+
+        [
+            InlineKeyboardButton(
+                "🧪 أسمدة ومبيدات",
+                callback_data="help_fertilizer"
+            ),
+
+            InlineKeyboardButton(
+                "💧 مياه وري",
+                callback_data="help_water"
+            )
+        ],
+
+        [
+            InlineKeyboardButton(
+                "⛽ وقود وطاقة",
+                callback_data="help_fuel"
+            ),
+
+            InlineKeyboardButton(
+                "📦 تغليف وكراتين",
+                callback_data="help_packaging"
+            )
+        ],
+
+        [
+            InlineKeyboardButton(
+                "💱 صرافة",
+                callback_data="help_exchange"
+            ),
+
+            InlineKeyboardButton(
+                "🏦 رصيد الكاش",
+                callback_data="cmd_balance"
+            )
+        ],
+
+        [
+            InlineKeyboardButton(
+                "📊 تقرير اليوم",
+                callback_data="cmd_today"
+            ),
+
+            InlineKeyboardButton(
+                "📅 التقرير الشهري",
+                callback_data="cmd_month"
+            )
+        ],
+
+        [
+            InlineKeyboardButton(
+                "📈 الأرباح والصافي",
+                callback_data="cmd_profits"
+            ),
+
+            InlineKeyboardButton(
+                "📑 الديون والآجل",
+                callback_data="cmd_debts"
+            )
+        ],
+
+        [
+            InlineKeyboardButton(
+                "🔄 حذف آخر عملية",
+                callback_data="cmd_undo"
+            )
+        ]
+    ]
+
+    return InlineKeyboardMarkup(keyboard)
+
+
+# =========================================================
+# أمر /start
+# =========================================================
+
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    message = (
+        "🌱 *أهلاً بك في نظام إدارة مشروع زراعة الخيار* 🥒\n\n"
+
+        "يمكنك إرسال العملية مباشرة، والنظام سيقوم بتحليلها "
+        "وتسجيلها تلقائياً في Google Sheets.\n\n"
+
+        "*أمثلة:*\n\n"
+
+        "🥒 بيع خيار 500 كيلو بسعر 120 سعودي\n"
+        "⚖️ إنتاج اليوم 750 كيلو\n"
+        "🧪 سماد 25000 يمني\n"
+        "👷 أجرة عمال 150 سعودي\n"
+        "💧 مياه وري 10000 يمني\n"
+        "⛽ ديزل 50000 يمني\n"
+        "📦 كراتين 30000 يمني\n"
+        "📑 بيع آجل 500 سعودي\n\n"
+
+        "اختر من القائمة أو أرسل العملية مباشرة:"
+    )
+
+    await update.message.reply_text(
+        message,
+        reply_markup=get_main_keyboard(),
+        parse_mode="Markdown"
+    )
+
+
+# =========================================================
+# معالجة الصرافة
+# =========================================================
+
+async def handle_exchange(
+    update,
+    text
+):
+
+    norm_text = convert_arabic_numbers(text)
+
+    pattern = (
+        r"^صرف\s+"
+        r"(\d+(?:\.\d+)?)"
+        r"\s*(?:سعودي|ر\.س|رس)?"
+        r"\s*بسعر\s*"
+        r"(\d+(?:\.\d+)?)"
+    )
+
+    match = re.search(
+        pattern,
+        norm_text,
+        re.IGNORECASE
+    )
+
+    if not match:
+        return False
+
+    sar_amount = float(match.group(1))
+    rate = float(match.group(2))
+    yer_amount = sar_amount * rate
+
+    transaction_id = generate_transaction_id()
+    date_string = get_date_string()
+
+    balances = calculate_balances()
+
+    new_sar_balance = (
+        balances["ريال سعودي"] - sar_amount
+    )
+
+    new_yer_balance = (
+        balances["ريال يمني"] + yer_amount
+    )
+
+    # خصم السعودي
+    sheet.append_row([
+        date_string,
+        "تحويل عملة",
+        "صرافة",
+        f"صرف {sar_amount} ريال سعودي بسعر {rate}",
+        -sar_amount,
+        "ريال سعودي",
+        "صرافة",
+        new_sar_balance,
+        f"تحويل سعودي إلى يمني بسعر {rate}",
+        transaction_id
+    ])
+
+    # إضافة اليمني
+    sheet.append_row([
+        date_string,
+        "تحويل عملة",
+        "صرافة",
+        f"استلام {yer_amount} ريال يمني",
+        yer_amount,
+        "ريال يمني",
+        "صرافة",
+        new_yer_balance,
+        f"مقابل {sar_amount} ريال سعودي بسعر {rate}",
+        transaction_id
+    ])
+
+    await update.message.reply_text(
+        "✅ *تمت عملية الصرافة بنجاح*\n\n"
+
+        f"🔻 تم خصم: {format_number(sar_amount)} ر.س\n"
+        f"🔺 تم إضافة: {format_number(yer_amount)} ر.ي\n"
+        f"💱 سعر الصرف: {format_number(rate)}\n"
+        f"🆔 العملية: `{transaction_id}`",
+
+        parse_mode="Markdown"
+    )
+
+    return True
+
+
+# =========================================================
+# استقبال الرسائل
+# =========================================================
+
+async def handle_message(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    if not update.message or not update.message.text:
+        return
+
+    raw_text = update.message.text.strip()
+
+    if not raw_text:
+        return
+
+    # الصرافة
+    if raw_text.startswith("صرف"):
+        exchange_done = await handle_exchange(
+            update,
+            raw_text
+        )
+
+        if exchange_done:
+            return
+
+    # تحليل العملية
+    transaction = analyze_message(raw_text)
+
+    # التأكد من وجود مبلغ
+    if (
+        transaction["amount"] == 0
+        and transaction["type"] != "إنتاج"
+    ):
+        await update.message.reply_text(
+            "⚠️ *لم أتمكن من معرفة المبلغ.*\n\n"
+            "مثال:\n"
+            "`سماد 25000 يمني`\n"
+            "`بيع خيار 500 كيلو بسعر 120 سعودي`",
+
+            parse_mode="Markdown"
+        )
+
+        return
+
+    # تسجيل العملية
+    result = add_transaction(
+        transaction_type=transaction["type"],
+        category=transaction["category"],
+        details=transaction["details"],
+        amount=transaction["amount"],
+        currency=transaction["currency"],
+        operation=transaction["operation"],
+        explanation=transaction["explanation"]
+    )
+
+    icons = {
+        "إيراد": "🟢",
+        "مصروف": "🔴",
+        "إنتاج": "🥒",
+        "آجل / دين": "🟡"
+    }
+
+    icon = icons.get(
+        transaction["type"],
+        "✅"
+    )
+
+    # رسالة الإنتاج
+    if transaction["type"] == "إنتاج":
+
+        reply = (
+            f"{icon} *تم تسجيل الإنتاج بنجاح*\n\n"
+
+            f"📅 التاريخ: {result['date']}\n"
+            f"⚖️ الكمية: {format_number(transaction['amount'])} كيلو\n"
+            f"📂 الفئة: {transaction['category']}\n"
+            f"📝 البيان: {raw_text}\n"
+            f"🆔 المعرف: `{result['id']}`"
+        )
+
+    # الرسائل المالية
+    else:
+
+        reply = (
+            f"{icon} *تم تسجيل العملية بنجاح*\n\n"
+
+            f"📅 التاريخ: {result['date']}\n"
+            f"🏷️ النوع: {transaction['type']}\n"
+            f"📂 الفئة: {transaction['category']}\n"
+            f"💰 المبلغ: "
+            f"{format_number(abs(transaction['amount']))} "
+            f"{transaction['currency']}\n"
+        )
+
+        if transaction["quantity"] > 0:
+            reply += (
+                f"⚖️ الكمية: "
+                f"{format_number(transaction['quantity'])} كيلو\n"
+            )
+
+        reply += (
+            f"🏦 الرصيد: "
+            f"{format_number(result['balance'])} "
+            f"{transaction['currency']}\n"
+
+            f"📝 البيان: {raw_text}\n"
+            f"🆔 المعرف: `{result['id']}`"
+        )
+
+    await update.message.reply_text(
+        reply,
+        parse_mode="Markdown"
+    )
+
+
+# =========================================================
+# تقرير اليوم
+# =========================================================
+
+def get_today_report():
+
+    records = sheet.get_all_values()
+
+    today = get_today_string()
+
+    production = 0.0
+
+    sar_income = 0.0
+    sar_expense = 0.0
+
+    yer_income = 0.0
+    yer_expense = 0.0
+
+    transactions_count = 0
+
+    for row in records[1:]:
+
+        if len(row) < 6:
+            continue
+
+        if not row[0].startswith(today):
+            continue
+
+        transactions_count += 1
+
+        transaction_type = row[1]
+
+        try:
+            amount = float(
+                row[4].replace(",", "")
+            )
+        except Exception:
+            continue
+
+        currency = row[5]
+
+        if transaction_type == "إنتاج":
+            production += abs(amount)
+            continue
+
+        if currency == "ريال سعودي":
+
+            if transaction_type == "إيراد":
+                sar_income += abs(amount)
+
+            elif transaction_type == "مصروف":
+                sar_expense += abs(amount)
+
+        elif currency == "ريال يمني":
+
+            if transaction_type == "إيراد":
+                yer_income += abs(amount)
+
+            elif transaction_type == "مصروف":
+                yer_expense += abs(amount)
+
+    return {
+        "production": production,
+
+        "sar_income": sar_income,
+        "sar_expense": sar_expense,
+
+        "yer_income": yer_income,
+        "yer_expense": yer_expense,
+
+        "count": transactions_count
+    }
+
+
+# =========================================================
+# التقرير الشهري
+# =========================================================
+
+def get_month_report():
+
+    records = sheet.get_all_values()
+
+    current_month = get_now().strftime("%Y-%m")
+
+    production = 0.0
+
+    sar_income = 0.0
+    sar_expense = 0.0
+
+    yer_income = 0.0
+    yer_expense = 0.0
+
+    count = 0
+
+    for row in records[1:]:
+
+        if len(row) < 6:
+            continue
+
+        if not row[0].startswith(current_month):
+            continue
+
+        count += 1
+
+        transaction_type = row[1]
+
+        try:
+            amount = float(
+                row[4].replace(",", "")
+            )
+        except Exception:
+            continue
+
+        currency = row[5]
+
+        if transaction_type == "إنتاج":
+            production += abs(amount)
+            continue
+
+        if currency == "ريال سعودي":
+
+            if transaction_type == "إيراد":
+                sar_income += abs(amount)
+
+            elif transaction_type == "مصروف":
+                sar_expense += abs(amount)
+
+        elif currency == "ريال يمني":
+
+            if transaction_type == "إيراد":
+                yer_income += abs(amount)
+
+            elif transaction_type == "مصروف":
+                yer_expense += abs(amount)
+
+    return {
+        "production": production,
+
+        "sar_income": sar_income,
+        "sar_expense": sar_expense,
+
+        "yer_income": yer_income,
+        "yer_expense": yer_expense,
+
+        "count": count
+    }
+
+
+# =========================================================
+# الأرباح الكلية
+# =========================================================
+
+def get_profit_report():
+
+    records = sheet.get_all_values()
+
+    sar_income = 0.0
+    sar_expense = 0.0
+
+    yer_income = 0.0
+    yer_expense = 0.0
+
+    total_production = 0.0
+
+    for row in records[1:]:
+
+        if len(row) < 6:
+            continue
+
+        transaction_type = row[1]
+
+        try:
+            amount = float(
+                row[4].replace(",", "")
+            )
+        except Exception:
+            continue
+
+        currency = row[5]
+
+        if transaction_type == "إنتاج":
+            total_production += abs(amount)
+            continue
+
+        if transaction_type == "إيراد":
+
+            if currency == "ريال سعودي":
+                sar_income += abs(amount)
+
+            elif currency == "ريال يمني":
+                yer_income += abs(amount)
+
+        elif transaction_type == "مصروف":
+
+            if currency == "ريال سعودي":
+                sar_expense += abs(amount)
+
+            elif currency == "ريال يمني":
+                yer_expense += abs(amount)
+
+    return {
+        "production": total_production,
+
+        "sar_income": sar_income,
+        "sar_expense": sar_expense,
+
+        "sar_profit": sar_income - sar_expense,
+
+        "yer_income": yer_income,
+        "yer_expense": yer_expense,
+
+        "yer_profit": yer_income - yer_expense
+    }
+
+
+# =========================================================
+# الديون
+# =========================================================
+
+def get_debts():
+
+    records = sheet.get_all_values()
+
+    sar_debt = 0.0
+    yer_debt = 0.0
+
+    for row in records[1:]:
+
+        if len(row) < 6:
+            continue
+
+        if row[1] != "آجل / دين":
+            continue
+
+        try:
+            amount = abs(
+                float(row[4].replace(",", ""))
+            )
+        except Exception:
+            continue
+
+        if row[5] == "ريال سعودي":
+            sar_debt += amount
+
+        elif row[5] == "ريال يمني":
+            yer_debt += amount
+
+    return sar_debt, yer_debt
+
+
+# =========================================================
+# معالجة الأزرار
+# =========================================================
+
+async def handle_buttons(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    query = update.callback_query
+
+    await query.answer()
+
+    action = query.data
+
+    help_messages = {
+
+        "help_sale":
+            "🥒 *تسجيل بيع الخيار*\n\n"
+            "أرسل مثلاً:\n"
+            "`بيع خيار 500 كيلو بسعر 120 سعودي`\n\n"
+            "سيحسب النظام الإجمالي تلقائياً.",
+
+        "help_production":
+            "⚖️ *تسجيل الإنتاج*\n\n"
+            "أرسل:\n"
+            "`إنتاج اليوم 750 كيلو`",
+
+        "help_expense":
+            "💸 *تسجيل مصروف*\n\n"
+            "مثال:\n"
+            "`مصروف 25000 يمني`\n"
+            "أو:\n"
+            "`شراء أدوات 100 سعودي`",
+
+        "help_workers":
+            "👷 *تسجيل أجور العمال*\n\n"
+            "مثال:\n"
+            "`أجرة عمال 150 سعودي`",
+
+        "help_fertilizer":
+            "🧪 *تسجيل سماد أو مبيد*\n\n"
+            "مثال:\n"
+            "`سماد 25000 يمني`\n"
+            "`مبيد 100 سعودي`",
+
+        "help_water":
+            "💧 *تسجيل مياه وري*\n\n"
+            "مثال:\n"
+            "`مياه وري 15000 يمني`",
+
+        "help_fuel":
+            "⛽ *تسجيل وقود*\n\n"
+            "مثال:\n"
+            "`ديزل 50000 يمني`",
+
+        "help_packaging":
+            "📦 *تسجيل التغليف والكراتين*\n\n"
+            "مثال:\n"
+            "`كراتين 30000 يمني`",
+
+        "help_exchange":
+            "💱 *عملية صرافة*\n\n"
+            "اكتب بالشكل التالي:\n"
+            "`صرف 200 سعودي بسعر 535`"
+    }
+
+    if action in help_messages:
+
+        await query.message.reply_text(
+            help_messages[action],
+            parse_mode="Markdown"
+        )
+
+        return
+
+    if action == "cmd_balance":
+
+        balances = calculate_balances()
+
+        await query.message.reply_text(
+            "🏦 *أرصدة الكاش الحالية*\n\n"
+
+            f"🇸🇦 سعودي: "
+            f"{format_number(balances['ريال سعودي'])} ر.س\n"
+
+            f"🇾🇪 يمني: "
+            f"{format_number(balances['ريال يمني'])} ر.ي",
+
+            parse_mode="Markdown"
+        )
+
+        return
+
+    if action == "cmd_today":
+
+        report = get_today_report()
+
+        await query.message.reply_text(
+            f"📊 *تقرير اليوم — {get_today_string()}*\n\n"
+
+            f"⚖️ الإنتاج: "
+            f"{format_number(report['production'])} كيلو\n\n"
+
+            f"🇸🇦 *الريال السعودي*\n"
+            f"🟢 الإيرادات: "
+            f"{format_number(report['sar_income'])} ر.س\n"
+            f"🔴 المصروفات: "
+            f"{format_number(report['sar_expense'])} ر.س\n"
+            f"📈 الصافي: "
+            f"{format_number(report['sar_income'] - report['sar_expense'])} ر.س\n\n"
+
+            f"🇾🇪 *الريال اليمني*\n"
+            f"🟢 الإيرادات: "
+            f"{format_number(report['yer_income'])} ر.ي\n"
+            f"🔴 المصروفات: "
+            f"{format_number(report['yer_expense'])} ر.ي\n"
+            f"📈 الصافي: "
+            f"{format_number(report['yer_income'] - report['yer_expense'])} ر.ي\n\n"
+
+            f"📋 عدد العمليات: {report['count']}",
+
+            parse_mode="Markdown"
+        )
+
+        return
+
+    if action == "cmd_month":
+
+        report = get_month_report()
+
+        month = get_now().strftime("%Y-%m")
+
+        await query.message.reply_text(
+            f"📅 *التقرير الشهري — {month}*\n\n"
+
+            f"⚖️ إجمالي الإنتاج: "
+            f"{format_number(report['production'])} كيلو\n\n"
+
+            f"🇸🇦 سعودي\n"
+            f"🟢 الإيرادات: "
+            f"{format_number(report['sar_income'])} ر.س\n"
+            f"🔴 المصروفات: "
+            f"{format_number(report['sar_expense'])} ر.س\n"
+            f"📈 الصافي: "
+            f"{format_number(report['sar_income'] - report['sar_expense'])} ر.س\n\n"
+
+            f"🇾🇪 يمني\n"
+            f"🟢 الإيرادات: "
+            f"{format_number(report['yer_income'])} ر.ي\n"
+            f"🔴 المصروفات: "
+            f"{format_number(report['yer_expense'])} ر.ي\n"
+            f"📈 الصافي: "
+            f"{format_number(report['yer_income'] - report['yer_expense'])} ر.ي\n\n"
+
+            f"📋 عدد العمليات: {report['count']}",
+
+            parse_mode="Markdown"
+        )
+
+        return
+
+    if action == "cmd_profits":
+
+        report = get_profit_report()
+
+        await query.message.reply_text(
+            "📈 *التقرير المالي الكامل للمشروع*\n\n"
+
+            f"🥒 إجمالي الإنتاج المسجل: "
+            f"{format_number(report['production'])} كيلو\n\n"
+
+            f"🇸🇦 *ريال سعودي*\n"
+            f"🟢 إجمالي الإيرادات: "
+            f"{format_number(report['sar_income'])} ر.س\n"
+            f"🔴 إجمالي المصروفات: "
+            f"{format_number(report['sar_expense'])} ر.س\n"
+            f"💰 صافي الربح: "
+            f"{format_number(report['sar_profit'])} ر.س\n\n"
+
+            f"🇾🇪 *ريال يمني*\n"
+            f"🟢 إجمالي الإيرادات: "
+            f"{format_number(report['yer_income'])} ر.ي\n"
+            f"🔴 إجمالي المصروفات: "
+            f"{format_number(report['yer_expense'])} ر.ي\n"
+            f"💰 صافي الربح: "
+            f"{format_number(report['yer_profit'])} ر.ي",
+
+            parse_mode="Markdown"
+        )
+
+        return
+
+    if action == "cmd_debts":
+
+        sar_debt, yer_debt = get_debts()
+
+        await query.message.reply_text(
+            "📑 *إجمالي الديون والعمليات الآجلة*\n\n"
+
+            f"🇸🇦 سعودي: "
+            f"{format_number(sar_debt)} ر.س\n"
+
+            f"🇾🇪 يمني: "
+            f"{format_number(yer_debt)} ر.ي",
+
+            parse_mode="Markdown"
+        )
+
+        return
+
+    if action == "cmd_undo":
+
+        records = sheet.get_all_values()
+
+        if len(records) <= 1:
+
+            await query.message.reply_text(
+                "⚠️ لا توجد عمليات لحذفها."
+            )
+
+            return
+
+        last_row = records[-1]
+
+        sheet.delete_rows(len(records))
+
+        await query.message.reply_text(
+            "🔄 *تم حذف آخر عملية بنجاح*\n\n"
+
+            f"📅 التاريخ: {last_row[0]}\n"
+            f"🏷️ النوع: {last_row[1]}\n"
+            f"📂 الفئة: {last_row[2]}\n"
+            f"💰 المبلغ: {last_row[4]} {last_row[5]}",
+
+            parse_mode="Markdown"
+        )
+
+        return
+
+
+# =========================================================
+# معالجة الأخطاء
+# =========================================================
+
+async def error_handler(
+    update,
+    context
+):
+
+    print("حدث خطأ:")
+    print(context.error)
+
+
+# =========================================================
+# تشغيل البوت
+# =========================================================
+
+if __name__ == "__main__":
+
+    app = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .build()
+    )
+
+    # الأوامر
+    app.add_handler(
+        CommandHandler(
+            "start",
+            start
+        )
+    )
+
+    # الأزرار
+    app.add_handler(
+        CallbackQueryHandler(
+            handle_buttons
+        )
+    )
+
+    # الرسائل النصية
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            handle_message
+        )
+    )
+
+    # الأخطاء
+    app.add_error_handler(
+        error_handler
+    )
+
+    print("=" * 50)
+    print("🤖 بوت إدارة مشروع زراعة الخيار يعمل الآن")
+    print("🥒 Telegram + Google Sheets")
+    print("=" * 50)
+
+    app.run_polling(
+        drop_pending_updates=True
+    )
