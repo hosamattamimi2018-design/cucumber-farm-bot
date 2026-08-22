@@ -20,7 +20,7 @@ from telegram.ext import (
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-# مكتبات توليد الـ PDF ودعم الخطوط واللغة العربية
+# مكتبات الـ PDF واللغة العربية
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -29,6 +29,24 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 import arabic_reshaper
 from bidi.algorithm import get_display
+
+
+# =========================================================
+# الإعدادات وأرقام المديرين
+# =========================================================
+
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8943498488:AAFbsQw7oPJqqADrxYdo3k7eC1lZe5jgqm4")
+
+# معرف المدير الحالي (ويمكنك إضافة المدير الثاني لاحقاً بفاصلة: [6017996704, المدير_الثاني])
+ADMIN_IDS = [6017996704]
+
+SPREADSHEET_URL = (
+    "https://docs.google.com/spreadsheets/d/"
+    "11ijvD8IIRjz6imUVphwav62nnCq36R6vRDa_1QhFljk/edit"
+)
+
+CREDENTIALS_FILE = "credentials.json"
+SHEET_NAME = "Sheet1"
 
 
 # =========================================================
@@ -51,7 +69,7 @@ else:
 
 
 # =========================================================
-# خادم ويب وهمي بسيط لتجاوز فحص المنفذ في Render
+# خادم ويب لتجاوز فحص المنفذ في Render
 # =========================================================
 
 class SimpleHandler(BaseHTTPRequestHandler):
@@ -70,21 +88,6 @@ def run_web_server():
     port = int(os.environ.get("PORT", 10000))
     server = HTTPServer(("0.0.0.0", port), SimpleHandler)
     server.serve_forever()
-
-
-# =========================================================
-# الإعدادات
-# =========================================================
-
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8943498488:AAFbsQw7oPJqqADrxYdo3k7eC1lZe5jgqm4")
-
-SPREADSHEET_URL = (
-    "https://docs.google.com/spreadsheets/d/"
-    "11ijvD8IIRjz6imUVphwav62nnCq36R6vRDa_1QhFljk/edit"
-)
-
-CREDENTIALS_FILE = "credentials.json"
-SHEET_NAME = "Sheet1"
 
 
 # =========================================================
@@ -110,12 +113,12 @@ except gspread.WorksheetNotFound:
     sheet = spreadsheet.add_worksheet(
         title=SHEET_NAME,
         rows=1000,
-        cols=10
+        cols=11
     )
 
 
 # =========================================================
-# إعداد أعمدة الجدول
+# إعداد أعمدة الجدول (يشمل عمود المسجل)
 # =========================================================
 
 HEADERS = [
@@ -128,7 +131,8 @@ HEADERS = [
     "العملية",
     "الرصيد",
     "الشرح",
-    "معرف العملية"
+    "معرف العملية",
+    "بواسطة"
 ]
 
 
@@ -138,7 +142,7 @@ def ensure_headers():
         sheet.append_row(HEADERS)
     elif first_row[:len(HEADERS)] != HEADERS:
         sheet.update(
-            range_name="A1:J1",
+            range_name="A1:K1",
             values=[HEADERS]
         )
 
@@ -147,7 +151,7 @@ ensure_headers()
 
 
 # =========================================================
-# دوال مساعدة ومعالجة النصوص والأرقام
+# دوال مساعدة
 # =========================================================
 
 def convert_arabic_numbers(text: str) -> str:
@@ -165,7 +169,6 @@ def format_number(number):
 
 
 def format_ar_pdf(text: str) -> str:
-    """إعادة تشكيل النص العربي وعكسه ليظهر بشكل صحيح في ملف الـ PDF"""
     reshaped_text = arabic_reshaper.reshape(str(text))
     return get_display(reshaped_text)
 
@@ -280,7 +283,8 @@ def add_transaction(
     amount=0.0,
     currency="ريال يمني",
     operation="",
-    explanation=""
+    explanation="",
+    user_name="مستخدم"
 ):
     date_string = get_date_string()
     transaction_id = generate_transaction_id()
@@ -296,7 +300,8 @@ def add_transaction(
         operation,
         balance,
         explanation,
-        transaction_id
+        transaction_id,
+        user_name
     ]
 
     sheet.append_row(row, value_input_option="USER_ENTERED")
@@ -392,7 +397,25 @@ def analyze_message(text):
 
 
 # =========================================================
-# توليد تقرير PDF مع دعم كامل للغة العربية
+# دالة إرسال التنبيهات الفورية للمدير
+# =========================================================
+
+async def notify_admins(context: ContextTypes.DEFAULT_TYPE, message_text: str, sender_chat_id: int):
+    for admin_id in ADMIN_IDS:
+        # إرسال التنبيه إذا كان المسجل شخصاً آخر غير المدير نفسه
+        if admin_id != sender_chat_id:
+            try:
+                await context.bot.send_message(
+                    chat_id=admin_id,
+                    text=message_text,
+                    parse_mode="Markdown"
+                )
+            except Exception as e:
+                print(f"Failed to notify admin {admin_id}: {e}")
+
+
+# =========================================================
+# توليد تقرير PDF
 # =========================================================
 
 def generate_pdf_report():
@@ -431,7 +454,6 @@ def generate_pdf_report():
     elements.append(Paragraph(format_ar_pdf(f"تاريخ التقرير: {get_date_string()}"), normal_style))
     elements.append(Spacer(1, 10))
 
-    # جلب الحسابات
     profit_data = get_profit_report()
     sar_debt, yer_debt = get_debts()
     balances = calculate_balances()
@@ -461,7 +483,6 @@ def generate_pdf_report():
     elements.append(summary_table)
     elements.append(Spacer(1, 20))
 
-    # آخر العمليات المسجلة
     elements.append(Paragraph(format_ar_pdf("آخر العمليات المسجلة في النظام"), title_style))
     elements.append(Spacer(1, 5))
 
@@ -714,9 +735,10 @@ def get_main_keyboard():
 # =========================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_name = update.effective_user.first_name or "أخي الكريم"
     message = (
-        "🌱 *أهلاً بك في نظام إدارة مشروع زراعة الخيار* 🥒\n\n"
-        "يمكنك إرسال العملية مباشرة، والنظام سيقوم بتحليلها وتسجيلها تلقائياً في Google Sheets.\n\n"
+        f"🌱 *أهلاً بك {user_name} في نظام إدارة مشروع المحمية* 🥒\n\n"
+        "يمكنك إرسال العملية مباشرة، والنظام سيقوم بتحليلها وتسجيلها فوراً في Google Sheets وتنبيه الإدارة.\n\n"
         "*أمثلة سريعة:*\n"
         "🥒 `بيع خيار 500 كيلو بسعر 120 سعودي`\n"
         "⚖️ `إنتاج اليوم 750 كيلو`\n"
@@ -736,7 +758,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # معالجة الصرافة
 # =========================================================
 
-async def handle_exchange(update, text):
+async def handle_exchange(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
     norm_text = convert_arabic_numbers(text)
     pattern = r"^صرف\s+(\d+(?:\.\d+)?)\s*(?:سعودي|ر\.س|رس)?\s*بسعر\s*(\d+(?:\.\d+)?)"
     match = re.search(pattern, norm_text, re.IGNORECASE)
@@ -751,6 +773,7 @@ async def handle_exchange(update, text):
     transaction_id = generate_transaction_id()
     date_string = get_date_string()
     balances = calculate_balances()
+    user_name = update.effective_user.full_name or update.effective_user.first_name or "مستخدم"
 
     new_sar_balance = balances["ريال سعودي"] - sar_amount
     new_yer_balance = balances["ريال يمني"] + yer_amount
@@ -760,7 +783,7 @@ async def handle_exchange(update, text):
         f"صرف {sar_amount} ريال سعودي بسعر {rate}",
         -sar_amount, "ريال سعودي", "صرافة",
         new_sar_balance, f"تحويل سعودي إلى يمني بسعر {rate}",
-        transaction_id
+        transaction_id, user_name
     ])
 
     sheet.append_row([
@@ -768,22 +791,29 @@ async def handle_exchange(update, text):
         f"استلام {yer_amount} ريال يمني",
         yer_amount, "ريال يمني", "صرافة",
         new_yer_balance, f"مقابل {sar_amount} ريال سعودي بسعر {rate}",
-        transaction_id
+        transaction_id, user_name
     ])
 
-    await update.message.reply_text(
+    reply = (
         "✅ *تمت عملية الصرافة بنجاح*\n\n"
         f"🔻 تم خصم: {format_number(sar_amount)} ر.س\n"
         f"🔺 تم إضافة: {format_number(yer_amount)} ر.ي\n"
         f"💱 سعر الصرف: {format_number(rate)}\n"
-        f"🆔 العملية: `{transaction_id}`",
-        parse_mode="Markdown"
+        f"👤 المنفذ: {user_name}\n"
+        f"🆔 العملية: `{transaction_id}`"
     )
+
+    await update.message.reply_text(reply, parse_mode="Markdown")
+
+    # إشعار للمدير
+    admin_alert = f"🔔 *إشعار صرافة جديدة*\n\n" + reply
+    await notify_admins(context, admin_alert, update.effective_chat.id)
+
     return True
 
 
 # =========================================================
-# استقبال الرسائل
+# استقبال ومعالجة الرسائل
 # =========================================================
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -795,7 +825,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if raw_text.startswith("صرف"):
-        if await handle_exchange(update, raw_text):
+        if await handle_exchange(update, context, raw_text):
             return
 
     transaction = analyze_message(raw_text)
@@ -810,6 +840,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    user_name = update.effective_user.full_name or update.effective_user.first_name or "مستخدم"
+
     result = add_transaction(
         transaction_type=transaction["type"],
         category=transaction["category"],
@@ -817,7 +849,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         amount=transaction["amount"],
         currency=transaction["currency"],
         operation=transaction["operation"],
-        explanation=transaction["explanation"]
+        explanation=transaction["explanation"],
+        user_name=user_name
     )
 
     icons = {"إيراد": "🟢", "مصروف": "🔴", "إنتاج": "🥒", "آجل / دين": "🟡"}
@@ -829,6 +862,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📅 التاريخ: {result['date']}\n"
             f"⚖️ الكمية: {format_number(transaction['amount'])} كيلو\n"
             f"📂 الفئة: {transaction['category']}\n"
+            f"👤 المسجل: {user_name}\n"
             f"📝 البيان: {raw_text}\n"
             f"🆔 المعرف: `{result['id']}`"
         )
@@ -845,11 +879,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         reply += (
             f"🏦 الرصيد: {format_number(result['balance'])} {transaction['currency']}\n"
+            f"👤 المسجل: {user_name}\n"
             f"📝 البيان: {raw_text}\n"
             f"🆔 المعرف: `{result['id']}`"
         )
 
     await update.message.reply_text(reply, parse_mode="Markdown")
+
+    # إرسال إشعار فوري للمدير
+    admin_alert = f"🔔 *إشعار عملية جديدة بالمحمية*\n\n" + reply
+    await notify_admins(context, admin_alert, update.effective_chat.id)
 
 
 # =========================================================
@@ -949,10 +988,21 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         last_row = records[-1]
         sheet.delete_rows(len(records))
-        await query.message.reply_text(
-            f"🔄 *تم حذف آخر عملية بنجاح*\n\n📅 التاريخ: {last_row[0]}\n🏷️ النوع: {last_row[1]}\n📂 الفئة: {last_row[2]}\n💰 المبلغ: {last_row[4]} {last_row[5]}",
-            parse_mode="Markdown"
+        user_name = update.effective_user.full_name or update.effective_user.first_name or "مستخدم"
+        
+        reply = (
+            f"🔄 *تم حذف آخر عملية بنجاح*\n\n"
+            f"📅 التاريخ: {last_row[0]}\n"
+            f"🏷️ النوع: {last_row[1]}\n"
+            f"📂 الفئة: {last_row[2]}\n"
+            f"💰 المبلغ: {last_row[4]} {last_row[5]}\n"
+            f"👤 بواسطة: {user_name}"
         )
+        await query.message.reply_text(reply, parse_mode="Markdown")
+
+        # إشعار المدير بالحذف
+        admin_alert = f"⚠️ *إشعار حذف عملية من النظام*\n\n" + reply
+        await notify_admins(context, admin_alert, update.effective_chat.id)
         return
 
 
@@ -986,7 +1036,7 @@ if __name__ == "__main__":
 
     print("=" * 50)
     print("🤖 بوت إدارة مشروع زراعة الخيار يعمل الآن")
-    print("🥒 Telegram + Google Sheets + PDF Export")
+    print("🥒 Telegram + Google Sheets + Admin Alerts")
     print("=" * 50)
 
     app.run_polling(drop_pending_updates=True)
