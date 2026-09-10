@@ -421,7 +421,7 @@ async def notify_admins(context: ContextTypes.DEFAULT_TYPE, message_text: str, s
 
 
 # =========================================================
-# قراءة وتحليل صورة الفاتورة بدقة عالية ومحصنة
+# قراءة وتحليل صورة الفاتورة بالحسابات الرياضية المترابطة
 # =========================================================
 
 def parse_invoice_image(image_bytes: bytes) -> dict:
@@ -431,7 +431,7 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
     try:
         img = Image.open(io.BytesIO(image_bytes))
         img = ImageOps.exif_transpose(img)
-        img.thumbnail((1400, 1400))
+        img.thumbnail((1600, 1600))
         
         buffered = io.BytesIO()
         img.save(buffered, format="JPEG", quality=90)
@@ -439,19 +439,17 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
 
         prompt = (
             "/no_think\n"
-            "أنت محاسب لسوق الخضار والحراج بوادي حضرموت.\n"
-            "القواعد المحاسبية للفاتورة:\n"
-            "- الخصم = 3% من الإجمالي العام.\n"
-            "- الصافي = الإجمالي العام - 3% (أو الإجمالي × 0.97).\n"
-            "- عدد صناديق كل صنف = إجمالي السطر ÷ سعر الصندوق.\n\n"
-            "المطلوب استخراج الأرقام من الصورة بدقة:\n"
-            "1. TOTAL_GROSS: الإجمالي العام قبل الخصم.\n"
-            "2. NET: الرصيد المتبقي أو الصافي بعد خصم 3%.\n"
-            "3. BOXES: مجموع عدد الصناديق لجميع السطور.\n\n"
-            "أخرج الرد حصراً بهذه الصيغة:\n"
-            "GROSS: <الرقم>\n"
-            "NET: <الرقم>\n"
-            "BOXES: <الرقم>"
+            "أنت مدقق حسابات فواتير حراج وسوق الخضار بوادي حضرموت.\n"
+            "اقرأ الأرقام في الفاتورة:\n"
+            "- عدد الصناديق (الكمية)\n"
+            "- سعر الصندوق\n"
+            "- إجمالي السعر\n"
+            "- الخصم (3%)\n"
+            "- الصافي أو الرصيد المتبقي\n\n"
+            "اكتب الأرقام المستخرجة بهذا الشكل فقط:\n"
+            "BOXES: عدد الصناديق\n"
+            "GROSS: الإجمالي العام قبل الخصم\n"
+            "NET: الصافي بعد الخصم\n"
         )
 
         chat_completion = groq_client.chat.completions.create(
@@ -470,50 +468,67 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
                 }
             ],
             model="qwen/qwen3.6-27b",
-            max_tokens=300,
+            max_tokens=600,
             temperature=0.0
         )
 
-        raw = chat_completion.choices[0].message.content.strip()
-        clean_text = re.sub(r"<think>[\s\S]*?</think>", "", raw).strip() or raw
+        raw_text = chat_completion.choices[0].message.content.strip()
+        clean_text = re.sub(r"<think>[\s\S]*?</think>", "", raw_text).strip()
+        if not clean_text:
+            clean_text = raw_text
 
-        # استخراج القيم
+        boxes = 0.0
         gross = 0.0
         net = 0.0
-        boxes = 0.0
 
+        # محاولة الاستخراج عبر التسميات
+        b_m = re.search(r"BOXES\s*[:=]\s*(\d+)", clean_text, re.IGNORECASE)
         g_m = re.search(r"GROSS\s*[:=]\s*([\d,]+)", clean_text, re.IGNORECASE)
         n_m = re.search(r"NET\s*[:=]\s*([\d,]+)", clean_text, re.IGNORECASE)
-        b_m = re.search(r"BOXES\s*[:=]\s*(\d+)", clean_text, re.IGNORECASE)
 
-        if g_m: gross = float(g_m.group(1).replace(",", ""))
-        if n_m: net = float(n_m.group(1).replace(",", ""))
-        if b_m: boxes = float(b_m.group(1))
+        if b_m:
+            boxes = float(b_m.group(1))
+        if g_m:
+            gross = float(g_m.group(1).replace(",", ""))
+        if n_m:
+            net = float(n_m.group(1).replace(",", ""))
 
-        # تطبيق القواعد الحسابية والربط في حال نقص أحد الأرقام:
-        # 1. إذا كان الإجمالي موجوداً والصافي مفقوداً: الصافي = الإجمالي - 3%
+        # استخراج عام لجميع الأرقام للربط الرياضي التلقائي
+        all_numbers = [float(x.replace(",", "")) for x in re.findall(r"\b\d+(?:,\d+)?(?:\.\d+)?\b", clean_text)]
+        large_amounts = sorted([n for n in all_numbers if n >= 10000], reverse=True)
+
+        if net == 0 and large_amounts:
+            if len(large_amounts) >= 2:
+                potential_gross = large_amounts[0]
+                potential_net = large_amounts[1]
+                if 0.02 <= (potential_gross - potential_net) / potential_gross <= 0.04:
+                    gross = potential_gross
+                    net = potential_net
+                else:
+                    net = potential_net
+            else:
+                gross = large_amounts[0]
+                net = round(gross * 0.97)
+
         if gross > 0 and net == 0:
             net = round(gross * 0.97)
 
-        # 2. إذا كان الصافي موجوداً والإجمالي مفقوداً: الإجمالي = الصافي / 0.97
-        if net > 0 and gross == 0:
-            gross = round(net / 0.97)
-
-        # 3. إذا لم يحدد الصناديق بشكل مباشر، البحث عن الصناديق في النص
         if boxes == 0:
-            small_nums = [float(x) for x in re.findall(r"\b([1-9]|1[0-9])\b", clean_text)]
-            if small_nums:
-                boxes = small_nums[0]
+            candidate_boxes = [n for n in all_numbers if 1 <= n <= 99 and n != 3.0]
+            if candidate_boxes:
+                boxes = candidate_boxes[0]
 
         return {
             "boxes_count": boxes,
             "invoice_net_amount": net,
             "gross_amount": gross,
-            "currency": "ريال يمني"
+            "currency": "ريال يمني",
+            "raw_debug": clean_text
         }
 
     except Exception as e:
         return {"error": str(e)}
+
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.photo:
@@ -526,12 +541,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     invoice_net = 0.0
     currency = detect_currency(caption)
 
-    # 1. إذا كتب المستخدم الأرقام في وصف الصورة، نعتمدها فوراً وبدقة 100%
+    # 1. إذا كتبت الأرقام مع وصف الصورة تُعتمد فوراً
     if len(caption_nums) >= 2:
         boxes = caption_nums[0]
         invoice_net = caption_nums[1]
     else:
-        # 2. وإلا يقوم الذكاء الاصطناعي بقراءتها تلقائياً
         status_msg = await update.message.reply_text("⏳")
         try:
             photo_file = await update.message.photo[-1].get_file()
@@ -547,14 +561,16 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         boxes = float(data.get("boxes_count", 0))
         invoice_net = float(data.get("invoice_net_amount", 0))
+        raw_debug = data.get("raw_debug", "")
 
-    if boxes <= 0 or invoice_net <= 0:
-        err_text = "⚠️ لم أتمكن من معرفة الأرقام بدقة.\nاكتب مع الصورة عدد الصناديق والمبلغ، مثل:\n`9 118825`"
-        if 'status_msg' in locals():
-            await status_msg.edit_text(err_text, parse_mode="Markdown")
-        else:
-            await update.message.reply_text(err_text, parse_mode="Markdown")
-        return
+        if boxes <= 0 or invoice_net <= 0:
+            err_msg = (
+                f"⚠️ لم أتمكن من استخراج الأرقام بدقة.\n"
+                f"رد النموذج:\n`{raw_debug[:250]}`\n\n"
+                f"اكتب مع الصورة: عدد الصناديق والمبلغ (مثال: `9 118825`)"
+            )
+            await status_msg.edit_text(err_msg, parse_mode="Markdown")
+            return
 
     # احتساب المصروفات: 500 تكييس + 500 نقل لكل صندوق
     packing_cost = boxes * 500.0
@@ -999,7 +1015,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if await handle_exchange(update, context, raw_text):
             return
 
-    # معالجة سريعة لنص الفاتورة المباشر مثل: فاتورة 9 118825
+    # معالجة نص الفاتورة المباشر مثل: فاتورة 9 118825
     if raw_text.startswith("فاتورة") or raw_text.startswith("فاتوره"):
         nums = extract_numbers(raw_text)
         if len(nums) >= 2:
@@ -1145,7 +1161,7 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         report = get_profit_report()
         await query.message.reply_text(
             f"📈 الأرباح الكاملة:\n"
-            f"⚖️ الإنتاج: {report['production']:,.0f} كجم\n"
+            f"⚖️ الإنتاج: {report['production']:,.0f} كجم\n\n"
             f"🇸🇦 صافي سعودي: {report['sar_profit']:,.0f}\n"
             f"🇾🇪 صافي يمني: {report['yer_profit']:,.0f}"
         )
