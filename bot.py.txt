@@ -3,6 +3,7 @@ import io
 import datetime
 import re
 import uuid
+import json
 import threading
 import urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -20,6 +21,10 @@ from telegram.ext import (
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
+# مكتبات قراءة الصور بالذكاء الاصطناعي
+from google import genai
+from google.genai import types
+
 # مكتبات الـ PDF واللغة العربية
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
@@ -36,9 +41,12 @@ from bidi.algorithm import get_display
 # =========================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8943498488:AAFbsQw7oPJqqADrxYdo3k7eC1lZe5jgqm4")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
-# معرف المدير الحالي (ويمكنك إضافة المدير الثاني لاحقاً بفاصلة: [6017996704, المدير_الثاني])
-ADMIN_IDS = [8646384325,6017996704]
+# إعداد عميل Gemini Vision
+ai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+
+ADMIN_IDS = [8646384325, 6017996704]
 
 SPREADSHEET_URL = (
     "https://docs.google.com/spreadsheets/d/"
@@ -118,7 +126,7 @@ except gspread.WorksheetNotFound:
 
 
 # =========================================================
-# إعداد أعمدة الجدول (يشمل عمود المسجل)
+# إعداد أعمدة الجدول
 # =========================================================
 
 HEADERS = [
@@ -234,7 +242,7 @@ def extract_price(text):
 
 
 # =========================================================
-# حساب الرصيد
+# حساب الأرصدة
 # =========================================================
 
 def calculate_balances():
@@ -322,8 +330,8 @@ def detect_expense_category(text):
         "مياه وري": ["ماء", "مياه", "ري", "مضخة", "طرمبة"],
         "وقود وطاقة": ["ديزل", "بنزين", "وقود", "غاز"],
         "صيانة وشبكات ري": ["صيانة", "شبكة", "نقاطات", "خرطوم", "ماسورة", "مواسير"],
-        "تغليف وكراتين": ["كرتون", "كراتين", "سلة", "سلات", "تغليف", "أكياس"],
-        "نقل وتسويق": ["نقل", "سيارة", "شحن", "توصيل", "سوق"],
+        "تغليف وكراتين": ["كرتون", "كراتين", "سلة", "سلات", "تغليف", "أكياس", "صناديق", "صندوق"],
+        "نقل وتسويق": ["نقل", "سيارة", "شحن", "توصيل", "سوق", "دلالة"],
         "معدات وأدوات": ["معدات", "أداة", "ادوات", "مقص", "ميزان"]
     }
     for category, keywords in categories.items():
@@ -397,12 +405,11 @@ def analyze_message(text):
 
 
 # =========================================================
-# دالة إرسال التنبيهات الفورية للمدير
+# تنبيهات الإدارة
 # =========================================================
 
 async def notify_admins(context: ContextTypes.DEFAULT_TYPE, message_text: str, sender_chat_id: int):
     for admin_id in ADMIN_IDS:
-        # إرسال التنبيه إذا كان المسجل شخصاً آخر غير المدير نفسه
         if admin_id != sender_chat_id:
             try:
                 await context.bot.send_message(
@@ -412,6 +419,149 @@ async def notify_admins(context: ContextTypes.DEFAULT_TYPE, message_text: str, s
                 )
             except Exception as e:
                 print(f"Failed to notify admin {admin_id}: {e}")
+
+
+# =========================================================
+# قراءة فاتورة البيع بالصورة (Gemini Vision)
+# =========================================================
+
+def parse_invoice_image(image_bytes: bytes) -> dict:
+    if not ai_client:
+        return {"error": "لم يتم ضبط متغير البيئة GEMINI_API_KEY"}
+
+    prompt = """
+    أنت محاسب زراعي متخصص في تدقيق فواتير أسواق الحراج والخضار المركزية في وادي حضرموت / اليمن.
+    اقرأ صورة الفاتورة بدقة (حتى لو كانت مقلوبة أو رأسية أو أفقية).
+    
+    المطلوب استخراجه بصيغة JSON فقط:
+    1. "boxes_count": إجمالي عدد الصناديق المباعة (اجمع قيم عمود "الكمية" المكتوبة بجانب كلمة صندوق).
+    2. "invoice_net_amount": المبلغ الصافي بعد الخصم المكتوب تحت خانة "الرصيد المتبقي" أو بعد خصم عمولة السوق.
+    3. "currency": العملة (افتراضياً "ريال يمني").
+    4. "invoice_no": رقم الفاتورة أو الاستمارة إن وجد.
+
+    أرجع نتيجة بصيغة JSON فقط دون أي نصوص خارج القوسين:
+    {
+      "boxes_count": 9,
+      "invoice_net_amount": 118825,
+      "currency": "ريال يمني",
+      "invoice_no": "21400"
+    }
+    """
+
+    try:
+        response = ai_client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=[
+                types.Part.from_bytes(data=image_bytes, mime_type='image/jpeg'),
+                prompt
+            ]
+        )
+        text = response.text.replace("```json", "").replace("```", "").strip()
+        data = json.loads(text)
+        return data
+    except Exception as e:
+        return {"error": str(e)}
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.photo:
+        return
+
+    status_msg = await update.message.reply_text("⏳ جارٍ فحص صورة الفاتورة واستخراج الحسابات...")
+
+    try:
+        photo_file = await update.message.photo[-1].get_file()
+        photo_bytes = await photo_file.download_as_bytearray()
+        data = parse_invoice_image(bytes(photo_bytes))
+    except Exception as e:
+        await status_msg.edit_text(f"❌ خطأ أثناء تحميل الصورة: {e}")
+        return
+
+    if "error" in data:
+        await status_msg.edit_text(f"❌ تعذر معالجة الفاتورة: {data['error']}")
+        return
+
+    try:
+        boxes = float(data.get("boxes_count", 0))
+        invoice_net = float(data.get("invoice_net_amount", 0))
+        currency = data.get("currency", "ريال يمني")
+        inv_no = str(data.get("invoice_no", ""))
+    except Exception:
+        await status_msg.edit_text("⚠️ تعذر استخراج بيانات الفاتورة بصورة دقيقة.")
+        return
+
+    if boxes <= 0 or invoice_net <= 0:
+        await status_msg.edit_text("⚠️ لم يتم العثور على عدد الصناديق أو المبلغ الصافي بوضوح في الصورة.")
+        return
+
+    # التكاليف الميدانية: 500 ريال للصندوق تعبئة وتكييس + 500 ريال للصندوق نقل
+    packing_cost = boxes * 500.0
+    transport_cost = boxes * 500.0
+    total_deductions = packing_cost + transport_cost
+    final_net = invoice_net - total_deductions
+
+    user_name = update.effective_user.full_name or update.effective_user.first_name or "مستخدم"
+    date_str = get_date_string()
+    inv_label = f"فاتورة #{inv_no}" if inv_no else "فاتورة بيع"
+
+    # 1. تسجيل قيد الإيراد (المبلغ بعد خصم الفاتورة المسجل)
+    rev_res = add_transaction(
+        transaction_type="إيراد",
+        category="مبيعات محصول الخيار",
+        details=f"{inv_label} - مبيعات {boxes:.0f} صندوق خيار",
+        amount=invoice_net,
+        currency=currency,
+        operation="بيع",
+        explanation=f"صافي الحراج بعد خصم السوق لعدد {boxes:.0f} صندوق",
+        user_name=user_name
+    )
+
+    # 2. تسجيل قيد مصروف التكييس والتعبئة
+    add_transaction(
+        transaction_type="مصروف",
+        category="تغليف وكراتين",
+        details=f"أجرة تعبئة وتكييس {boxes:.0f} صندوق",
+        amount=-packing_cost,
+        currency=currency,
+        operation="صرف",
+        explanation=f"أجرة تكييس {boxes:.0f} صندوق × 500",
+        user_name=user_name
+    )
+
+    # 3. تسجيل قيد مصروف النقل
+    add_transaction(
+        transaction_type="مصروف",
+        category="نقل وتسويق",
+        details=f"أجرة نقل {boxes:.0f} صندوق إلى السوق",
+        amount=-transport_cost,
+        currency=currency,
+        operation="صرف",
+        explanation=f"أجرة نقل {boxes:.0f} صندوق × 500",
+        user_name=user_name
+    )
+
+    final_balance = rev_res['balance'] - total_deductions
+
+    summary = (
+        "🧾 *تم استلام فاتورة الحراج وقيد العمليات بنجاح*\n\n"
+        f"📅 التاريخ: {date_str}\n"
+        f"📦 إجمالي الصناديق: *{boxes:,.0f} صندوق*\n"
+        f"💵 صافي الفاتورة المسجل: *{format_number(invoice_net)} {currency}*\n"
+        "──────────────────\n"
+        f"✂️ أجرة التكييس (500 × {boxes:.0f}): *{format_number(packing_cost)} {currency}*\n"
+        f"🚚 أجرة النقل (500 × {boxes:.0f}): *{format_number(transport_cost)} {currency}*\n"
+        f"📉 إجمالي الخصومات الإضافية: *{format_number(total_deductions)} {currency}*\n"
+        "──────────────────\n"
+        f"💰 *الصافي المستحق للمزرعة: {format_number(final_net)} {currency}*\n"
+        f"🏦 رصيد الكاش بعد القيود: *{format_number(final_balance)} {currency}*\n"
+        f"👤 المسجل: {user_name}\n"
+        f"🆔 المعرف: `{rev_res['id']}`"
+    )
+
+    await status_msg.edit_text(summary, parse_mode="Markdown")
+
+    admin_alert = f"🔔 *إشعار فاتورة حراج جديدة*\n\n" + summary
+    await notify_admins(context, admin_alert, update.effective_chat.id)
 
 
 # =========================================================
@@ -738,8 +888,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.effective_user.first_name or "أخي الكريم"
     message = (
         f"🌱 *أهلاً بك {user_name} في نظام إدارة مشروع المحمية* 🥒\n\n"
-        "يمكنك إرسال العملية مباشرة، والنظام سيقوم بتحليلها وتسجيلها فوراً في Google Sheets وتنبيه الإدارة.\n\n"
+        "يمكنك إرسال العمليات نصياً أو إرسال **صورة فاتورة البيع مباشرة** لقراءتها واستخراج الصناديق والخصميات وتسجيلها فوراً.\n\n"
         "*أمثلة سريعة:*\n"
+        "📸 _أرسل صورة فاتورة الحراج مباشرة_\n"
         "🥒 `بيع خيار 500 كيلو بسعر 120 سعودي`\n"
         "⚖️ `إنتاج اليوم 750 كيلو`\n"
         "🧪 `سماد 25000 يمني`\n"
@@ -805,7 +956,6 @@ async def handle_exchange(update: Update, context: ContextTypes.DEFAULT_TYPE, te
 
     await update.message.reply_text(reply, parse_mode="Markdown")
 
-    # إشعار للمدير
     admin_alert = f"🔔 *إشعار صرافة جديدة*\n\n" + reply
     await notify_admins(context, admin_alert, update.effective_chat.id)
 
@@ -813,7 +963,7 @@ async def handle_exchange(update: Update, context: ContextTypes.DEFAULT_TYPE, te
 
 
 # =========================================================
-# استقبال ومعالجة الرسائل
+# استقبال ومعالجة الرسائل النصية
 # =========================================================
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -886,7 +1036,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(reply, parse_mode="Markdown")
 
-    # إرسال إشعار فوري للمدير
     admin_alert = f"🔔 *إشعار عملية جديدة بالمحمية*\n\n" + reply
     await notify_admins(context, admin_alert, update.effective_chat.id)
 
@@ -901,7 +1050,7 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action = query.data
 
     help_messages = {
-        "help_sale": "🥒 *تسجيل بيع الخيار*\n\nأرسل مثلاً:\n`بيع خيار 500 كيلو بسعر 120 سعودي`",
+        "help_sale": "🥒 *تسجيل بيع الخيار*\n\nأرسل صورة الفاتورة مباشرة، أو أرسل نصاً:\n`بيع خيار 500 كيلو بسعر 120 سعودي`",
         "help_production": "⚖️ *تسجيل الإنتاج*\n\nأرسل:\n`إنتاج اليوم 750 كيلو`",
         "help_expense": "💸 *تسجيل مصروف*\n\nمثال:\n`مصروف 25000 يمني`",
         "help_workers": "👷 *تسجيل أجور العمال*\n\nمثال:\n`أجرة عمال 150 سعودي`",
@@ -1000,7 +1149,6 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await query.message.reply_text(reply, parse_mode="Markdown")
 
-        # إشعار المدير بالحذف
         admin_alert = f"⚠️ *إشعار حذف عملية من النظام*\n\n" + reply
         await notify_admins(context, admin_alert, update.effective_chat.id)
         return
@@ -1031,12 +1179,13 @@ if __name__ == "__main__":
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_buttons))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
 
     print("=" * 50)
     print("🤖 بوت إدارة مشروع زراعة الخيار يعمل الآن")
-    print("🥒 Telegram + Google Sheets + Admin Alerts")
+    print("🥒 Telegram + Google Sheets + Invoice OCR Vision")
     print("=" * 50)
 
     app.run_polling(drop_pending_updates=True)
