@@ -4,6 +4,7 @@ import datetime
 import re
 import uuid
 import json
+import base64
 import threading
 import urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -21,7 +22,7 @@ from telegram.ext import (
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-# مكتبات قراءة الصور بالذكاء الاصطناعي
+# مكتبة Groq للرؤية ومعالجة الصور
 from groq import Groq
 from PIL import Image, ImageOps
 
@@ -37,15 +38,13 @@ from bidi.algorithm import get_display
 
 
 # =========================================================
-# الإعدادات وأرقام المديرين والمفاتيح
+# الإعدادات والمفاتيح
 # =========================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8943498488:AAFbsQw7oPJqqADrxYdo3k7eC1lZe5jgqm4")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AQ.Ab8RN6LQuYXD0d7-MKOSkFfxwhFMIFljugwr1c_20AJguqD9ww")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "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")
 
-# تهيئة مكتبة Gemini
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
 ADMIN_IDS = [8646384325, 6017996704]
 
@@ -423,56 +422,55 @@ async def notify_admins(context: ContextTypes.DEFAULT_TYPE, message_text: str, s
 
 
 # =========================================================
-# قراءة وتحليل صورة الفاتورة (Gemini Vision)
+# قراءة وتحليل صورة الفاتورة عبر Groq Vision
 # =========================================================
 
 def parse_invoice_image(image_bytes: bytes) -> dict:
-    if not GEMINI_API_KEY:
-        return {"error": "لم يتم ضبط مفتاح GEMINI_API_KEY"}
-
-    prompt = """
-    أنت محاسب زراعي متخصص في تدقيق فواتير أسواق الحراج والخضار المركزية في وادي حضرموت / اليمن.
-    اقرأ صورة الفاتورة بدقة (حتى لو كانت مقلوبة أو رأسية أو أفقية).
-    
-    المطلوب استخراجه بصيغة JSON فقط:
-    1. "boxes_count": إجمالي عدد الصناديق المباعة (اجمع قيم عمود "الكمية" المكتوبة بجانب كلمة صندوق).
-    2. "invoice_net_amount": المبلغ الصافي بعد الخصم المكتوب تحت خانة "الرصيد المتبقي" أو بعد طرح الخصم من الإجمالي.
-    3. "currency": العملة ("ريال يمني").
-    4. "invoice_no": رقم الفاتورة أو الاستمارة إن وجد.
-
-    أعد النتيجة بصيغة JSON فقط بدون أي علامات أو شروح خارجية:
-    {
-      "boxes_count": 9,
-      "invoice_net_amount": 118825,
-      "currency": "ريال يمني",
-      "invoice_no": "21400"
-    }
-    """
+    if not groq_client:
+        return {"error": "لم يتم ضبط مفتاح GROQ_API_KEY"}
 
     try:
-        image = Image.open(io.BytesIO(image_bytes))
-        image = ImageOps.exif_transpose(image)
+        img = Image.open(io.BytesIO(image_bytes))
+        img = ImageOps.exif_transpose(img)
+        img.thumbnail((1200, 1200))
         
-        # تجربة الموديلات المدعومة بالترتيب
-        candidate_models = ['gemini-2.0-flash', 'gemini-1.5-flash-latest', 'gemini-pro-vision']
-        response = None
-        last_error = ""
+        buffered = io.BytesIO()
+        img.save(buffered, format="JPEG", quality=85)
+        base64_image = base64.b64encode(buffered.getvalue()).decode('utf-8')
 
-        for model_name in candidate_models:
-            try:
-                model = genai.GenerativeModel(model_name)
-                response = model.generate_content([prompt, image])
-                if response and response.text:
-                    break
-            except Exception as ex:
-                last_error = str(ex)
-                continue
+        prompt = """
+        أنت محاسب زراعي خبير في قراءة فواتير الحراج المركزي بوادي حضرموت - اليمن.
+        اقرأ صورة الفاتورة واستخرج:
+        1. boxes_count: إجمالي عدد الصناديق المباعة (اجمع قيم عمود الكمية).
+        2. invoice_net_amount: المبلغ المتبقي بعد الخصم المكتوب تحت خانة (الرصيد المتبقي).
+        3. currency: العملة ("ريال يمني").
+        4. invoice_no: رقم الفاتورة إن وجد.
 
-        if not response:
-            return {"error": f"تعذر استدعاء النموذج: {last_error}"}
+        أرجع النتيجة بصيغة JSON فقط دون أي شروح إضافية بالشكل التالي:
+        {"boxes_count": 9, "invoice_net_amount": 118825, "currency": "ريال يمني", "invoice_no": "21400"}
+        """
 
-        text = response.text.replace("```json", "").replace("```", "").strip()
-        data = json.loads(text)
+        chat_completion = groq_client.chat.completions.create(
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{base64_image}",
+                            },
+                        },
+                    ],
+                }
+            ],
+            model="llama-3.2-11b-vision-preview",
+            response_format={"type": "json_object"}
+        )
+
+        content = chat_completion.choices[0].message.content
+        data = json.loads(content)
         return data
     except Exception as e:
         return {"error": str(e)}
@@ -482,14 +480,14 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.photo:
         return
 
-    status_msg = await update.message.reply_text("⏳ جارٍ فحص صورة الفاتورة واستخراج الحسابات...")
+    status_msg = await update.message.reply_text("⏳ جارٍ فحص صورة الفاتورة وتدقيق الحسابات...")
 
     try:
         photo_file = await update.message.photo[-1].get_file()
         photo_bytes = await photo_file.download_as_bytearray()
         data = parse_invoice_image(bytes(photo_bytes))
     except Exception as e:
-        await status_msg.edit_text(f"❌ خطأ أثناء تحميل الصورة: {e}")
+        await status_msg.edit_text(f"❌ خطأ في تحميل الصورة: {e}")
         return
 
     if "error" in data:
@@ -502,14 +500,14 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         currency = data.get("currency", "ريال يمني")
         inv_no = str(data.get("invoice_no", ""))
     except Exception:
-        await status_msg.edit_text("⚠️ تعذر استخراج بيانات الفاتورة بصورة دقيقة.")
+        await status_msg.edit_text("⚠️ تعذر استخراج الأرقام بوضوح من الصورة.")
         return
 
     if boxes <= 0 or invoice_net <= 0:
-        await status_msg.edit_text("⚠️ لم يتم العثور على عدد الصناديق أو المبلغ الصافي بوضوح في الصورة.")
+        await status_msg.edit_text("⚠️ لم يتم العثور على عدد الصناديق أو المبلغ الصافي بشكل واضح.")
         return
 
-    # التكاليف الميدانية: 500 ريال للصندوق تكييس/تعبئة + 500 ريال للصندوق نقل
+    # احتساب المصروفات: 500 ريال للصندوق تكييس + 500 ريال للصندوق نقل
     packing_cost = boxes * 500.0
     transport_cost = boxes * 500.0
     total_deductions = packing_cost + transport_cost
@@ -519,7 +517,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     date_str = get_date_string()
     inv_label = f"فاتورة #{inv_no}" if inv_no else "فاتورة بيع"
 
-    # 1. تسجيل قيد الإيراد (المبلغ بعد الخصم المكتوب في الفاتورة)
+    # 1. تسجيل قيد الإيراد
     rev_res = add_transaction(
         transaction_type="إيراد",
         category="مبيعات محصول الخيار",
@@ -527,11 +525,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         amount=invoice_net,
         currency=currency,
         operation="بيع",
-        explanation=f"صافي الحراج بعد خصم السوق لعدد {boxes:.0f} صندوق",
+        explanation=f"صافي الفاتورة بعد خصم السوق لعدد {boxes:.0f} صندوق",
         user_name=user_name
     )
 
-    # 2. تسجيل قيد مصروف التكييس والتعبئة
+    # 2. تسجيل قيد مصروف التكييس
     add_transaction(
         transaction_type="مصروف",
         category="تغليف وكراتين",
@@ -558,16 +556,16 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     final_balance = rev_res['balance'] - total_deductions
 
     summary = (
-        "🧾 *تم استلام فاتورة الحراج وقيد العمليات بنجاح*\n\n"
+        "🧾 *تم استلام فاتورة الحراج وقيد الحسابات بنجاح*\n\n"
         f"📅 التاريخ: {date_str}\n"
         f"📦 إجمالي الصناديق: *{boxes:,.0f} صندوق*\n"
-        f"💵 صافي الفاتورة المسجل: *{format_number(invoice_net)} {currency}*\n"
+        f"💵 صافي الفاتورة المكتوب: *{format_number(invoice_net)} {currency}*\n"
         "──────────────────\n"
         f"✂️ أجرة التكييس (500 × {boxes:.0f}): *{format_number(packing_cost)} {currency}*\n"
         f"🚚 أجرة النقل (500 × {boxes:.0f}): *{format_number(transport_cost)} {currency}*\n"
         f"📉 إجمالي الخصومات الإضافية: *{format_number(total_deductions)} {currency}*\n"
         "──────────────────\n"
-        f"💰 *الصافي المستحق للمزرعة: {format_number(final_net)} {currency}*\n"
+        f"💰 *الصافي النهائي المستحق: {format_number(final_net)} {currency}*\n"
         f"🏦 رصيد الكاش بعد القيود: *{format_number(final_balance)} {currency}*\n"
         f"👤 المسجل: {user_name}\n"
         f"🆔 المعرف: `{rev_res['id']}`"
@@ -903,7 +901,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.effective_user.first_name or "أخي الكريم"
     message = (
         f"🌱 *أهلاً بك {user_name} في نظام إدارة مشروع المحمية* 🥒\n\n"
-        "يمكنك إرسال العمليات نصياً أو إرسال **صورة فاتورة البيع مباشرة** لقراءتها واستخراج الصناديق والخصميات وتسجيلها فوراً.\n\n"
+        "يمكنك إرسال العمليات نصياً أو إرسال **صورة فاتورة البيع مباشرة** لقراءتها بالذكاء الاصطناعي وتطبيق خصم التكييس والنقل فوراً.\n\n"
         "*أمثلة سريعة:*\n"
         "📸 _أرسل صورة فاتورة الحراج مباشرة_\n"
         "🥒 `بيع خيار 500 كيلو بسعر 120 سعودي`\n"
@@ -1200,7 +1198,7 @@ if __name__ == "__main__":
 
     print("=" * 50)
     print("🤖 بوت إدارة مشروع زراعة الخيار يعمل الآن")
-    print("🥒 Telegram + Google Sheets + Invoice OCR Vision")
+    print("🥒 Telegram + Google Sheets + Groq Vision OCR")
     print("=" * 50)
 
     app.run_polling(drop_pending_updates=True)
