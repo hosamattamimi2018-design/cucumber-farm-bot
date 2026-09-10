@@ -22,8 +22,8 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 # مكتبات قراءة الصور بالذكاء الاصطناعي
-from google import genai
-from google.genai import types
+import google.generativeai as genai
+from PIL import Image, ImageOps
 
 # مكتبات الـ PDF واللغة العربية
 from reportlab.lib.pagesizes import letter
@@ -37,13 +37,15 @@ from bidi.algorithm import get_display
 
 
 # =========================================================
-# الإعدادات وأرقام المديرين
+# الإعدادات وأرقام المديرين والمفاتيح
 # =========================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8943498488:AAFbsQw7oPJqqADrxYdo3k7eC1lZe5jgqm4")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AQ.Ab8RN6JbpB-_ND_b6DdhmvRh8TihsoZWRzhETcl96paFQBE-Qg")
-# إعداد عميل Gemini Vision
-ai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AQ.Ab8RN6LQuYXD0d7-MKOSkFfxwhFMIFljugwr1c_20AJguqD9ww")
+
+# تهيئة مكتبة Gemini
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
 
 ADMIN_IDS = [8646384325, 6017996704]
 
@@ -421,12 +423,12 @@ async def notify_admins(context: ContextTypes.DEFAULT_TYPE, message_text: str, s
 
 
 # =========================================================
-# قراءة فاتورة البيع بالصورة (Gemini Vision)
+# قراءة وتحليل صورة الفاتورة (Gemini Vision)
 # =========================================================
 
 def parse_invoice_image(image_bytes: bytes) -> dict:
-    if not ai_client:
-        return {"error": "لم يتم ضبط متغير البيئة GEMINI_API_KEY"}
+    if not GEMINI_API_KEY:
+        return {"error": "لم يتم ضبط مفتاح GEMINI_API_KEY"}
 
     prompt = """
     أنت محاسب زراعي متخصص في تدقيق فواتير أسواق الحراج والخضار المركزية في وادي حضرموت / اليمن.
@@ -434,11 +436,11 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
     
     المطلوب استخراجه بصيغة JSON فقط:
     1. "boxes_count": إجمالي عدد الصناديق المباعة (اجمع قيم عمود "الكمية" المكتوبة بجانب كلمة صندوق).
-    2. "invoice_net_amount": المبلغ الصافي بعد الخصم المكتوب تحت خانة "الرصيد المتبقي" أو بعد خصم عمولة السوق.
+    2. "invoice_net_amount": المبلغ الصافي بعد الخصم المكتوب تحت خانة "الرصيد المتبقي" أو بعد طرح الخصم من الإجمالي.
     3. "currency": العملة (افتراضياً "ريال يمني").
     4. "invoice_no": رقم الفاتورة أو الاستمارة إن وجد.
 
-    أرجع نتيجة بصيغة JSON فقط دون أي نصوص خارج القوسين:
+    أعد النتيجة بصيغة JSON فقط بدون أي علامات أو شروح خارجية:
     {
       "boxes_count": 9,
       "invoice_net_amount": 118825,
@@ -448,13 +450,13 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
     """
 
     try:
-        response = ai_client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=[
-                types.Part.from_bytes(data=image_bytes, mime_type='image/jpeg'),
-                prompt
-            ]
-        )
+        image = Image.open(io.BytesIO(image_bytes))
+        image = ImageOps.exif_transpose(image)  # تصحيح تدوير الصورة تلقائياً
+        
+        # استخدام موديل 1.5 flash المتوافق
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        response = model.generate_content([prompt, image])
+        
         text = response.text.replace("```json", "").replace("```", "").strip()
         data = json.loads(text)
         return data
@@ -493,7 +495,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status_msg.edit_text("⚠️ لم يتم العثور على عدد الصناديق أو المبلغ الصافي بوضوح في الصورة.")
         return
 
-    # التكاليف الميدانية: 500 ريال للصندوق تعبئة وتكييس + 500 ريال للصندوق نقل
+    # التكاليف الميدانية: 500 ريال للصندوق تكييس/تعبئة + 500 ريال للصندوق نقل
     packing_cost = boxes * 500.0
     transport_cost = boxes * 500.0
     total_deductions = packing_cost + transport_cost
@@ -503,7 +505,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     date_str = get_date_string()
     inv_label = f"فاتورة #{inv_no}" if inv_no else "فاتورة بيع"
 
-    # 1. تسجيل قيد الإيراد (المبلغ بعد خصم الفاتورة المسجل)
+    # 1. تسجيل قيد الإيراد (المبلغ بعد الخصم المكتوب في الفاتورة)
     rev_res = add_transaction(
         transaction_type="إيراد",
         category="مبيعات محصول الخيار",
