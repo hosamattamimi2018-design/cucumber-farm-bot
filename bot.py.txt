@@ -41,10 +41,10 @@ from bidi.algorithm import get_display
 # =========================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8943498488:AAFbsQw7oPJqqADrxYdo3k7eC1lZe5jgqm4")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_API_KEY = os.getenv("AQ.Ab8RN6LyccOKkDh106PQEkZuFy1ORlkzxssy1vzj9ablCWomIw")
 
 # إعداد عميل Gemini Vision
-ai_client = genai.Client(api_key=Ab8RN6LyccOKkDh106PQEkZuFy1ORlkzxssy1vzj9ablCWomIw) if GEMINI_API_KEY else None
+ai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 ADMIN_IDS = [8646384325, 6017996704]
 
