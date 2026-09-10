@@ -22,7 +22,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 # مكتبات قراءة الصور بالذكاء الاصطناعي
-import google.generativeai as genai
+from groq import Groq
 from PIL import Image, ImageOps
 
 # مكتبات الـ PDF واللغة العربية
