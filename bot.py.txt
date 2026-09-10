@@ -450,7 +450,7 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
         {"boxes_count": 9, "invoice_net_amount": 118825, "currency": "ريال يمني", "invoice_no": "21400"}
         """
 
-chat_completion = groq_client.chat.completions.create(
+        chat_completion = groq_client.chat.completions.create(
             messages=[
                 {
                     "role": "user",
