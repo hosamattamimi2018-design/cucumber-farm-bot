@@ -437,7 +437,7 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
     المطلوب استخراجه بصيغة JSON فقط:
     1. "boxes_count": إجمالي عدد الصناديق المباعة (اجمع قيم عمود "الكمية" المكتوبة بجانب كلمة صندوق).
     2. "invoice_net_amount": المبلغ الصافي بعد الخصم المكتوب تحت خانة "الرصيد المتبقي" أو بعد طرح الخصم من الإجمالي.
-    3. "currency": العملة (افتراضياً "ريال يمني").
+    3. "currency": العملة ("ريال يمني").
     4. "invoice_no": رقم الفاتورة أو الاستمارة إن وجد.
 
     أعد النتيجة بصيغة JSON فقط بدون أي علامات أو شروح خارجية:
@@ -451,12 +451,26 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
 
     try:
         image = Image.open(io.BytesIO(image_bytes))
-        image = ImageOps.exif_transpose(image)  # تصحيح تدوير الصورة تلقائياً
+        image = ImageOps.exif_transpose(image)
         
-        # استخدام موديل 1.5 flash المتوافق
-       model = genai.GenerativeModel('gemini-2.0-flash')
-response = model.generate_content([prompt, image])
-        
+        # تجربة الموديلات المدعومة بالترتيب
+        candidate_models = ['gemini-2.0-flash', 'gemini-1.5-flash-latest', 'gemini-pro-vision']
+        response = None
+        last_error = ""
+
+        for model_name in candidate_models:
+            try:
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content([prompt, image])
+                if response and response.text:
+                    break
+            except Exception as ex:
+                last_error = str(ex)
+                continue
+
+        if not response:
+            return {"error": f"تعذر استدعاء النموذج: {last_error}"}
+
         text = response.text.replace("```json", "").replace("```", "").strip()
         data = json.loads(text)
         return data
