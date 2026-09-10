@@ -1,7 +1,7 @@
 python-telegram-bot
 gspread
 oauth2client
-google-generativeai
+groq
 Pillow
 reportlab
 arabic-reshaper
