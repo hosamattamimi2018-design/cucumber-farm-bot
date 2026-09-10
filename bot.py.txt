@@ -431,23 +431,27 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
     try:
         img = Image.open(io.BytesIO(image_bytes))
         img = ImageOps.exif_transpose(img)
-        img.thumbnail((1600, 1600))
+        img.thumbnail((1400, 1400))
         
         buffered = io.BytesIO()
         img.save(buffered, format="JPEG", quality=90)
         base64_image = base64.b64encode(buffered.getvalue()).decode('utf-8')
 
         prompt = (
-            "You are an expert accountant auditing vegetable market invoices in Seiyun / Hadhramout, Yemen.\n"
-            "Task: Extract:\n"
-            "1. Total quantity of boxes (sum all numbers in 'الكمية' column next to 'صندوق' / boxes).\n"
-            "2. Net Amount in Yemeni Rials (read the number under 'الرصيد المتبقي' or net amount, NOT thousands with dot decimals).\n"
-            "Respond strictly in this format without any extra text:\n"
-            "BOXES: <number>\n"
-            "NET: <number>\n"
-            "Example:\n"
-            "BOXES: 9\n"
-            "NET: 118825"
+            "/no_think\n"
+            "أنت محاسب لسوق الخضار والحراج بوادي حضرموت.\n"
+            "القواعد المحاسبية للفاتورة:\n"
+            "- الخصم = 3% من الإجمالي العام.\n"
+            "- الصافي = الإجمالي العام - 3% (أو الإجمالي × 0.97).\n"
+            "- عدد صناديق كل صنف = إجمالي السطر ÷ سعر الصندوق.\n\n"
+            "المطلوب استخراج الأرقام من الصورة بدقة:\n"
+            "1. TOTAL_GROSS: الإجمالي العام قبل الخصم.\n"
+            "2. NET: الرصيد المتبقي أو الصافي بعد خصم 3%.\n"
+            "3. BOXES: مجموع عدد الصناديق لجميع السطور.\n\n"
+            "أخرج الرد حصراً بهذه الصيغة:\n"
+            "GROSS: <الرقم>\n"
+            "NET: <الرقم>\n"
+            "BOXES: <الرقم>"
         )
 
         chat_completion = groq_client.chat.completions.create(
@@ -466,44 +470,50 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
                 }
             ],
             model="qwen/qwen3.6-27b",
-            max_tokens=500,
+            max_tokens=300,
             temperature=0.0
         )
 
         raw = chat_completion.choices[0].message.content.strip()
+        clean_text = re.sub(r"<think>[\s\S]*?</think>", "", raw).strip() or raw
 
-        # استخراج الصناديق
-        boxes = 0.0
-        b_match = re.search(r"BOXES\s*[:=]\s*(\d+)", raw, re.IGNORECASE)
-        if b_match:
-            boxes = float(b_match.group(1))
-
-        # استخراج الصافي
+        # استخراج القيم
+        gross = 0.0
         net = 0.0
-        n_match = re.search(r"NET\s*[:=]\s*([\d,]+)", raw, re.IGNORECASE)
-        if n_match:
-            net = float(n_match.group(1).replace(",", ""))
+        boxes = 0.0
 
-        # إذا لم يلتزم بالنمط، استخرج الأرقام المنطقية الكبيرة
-        if net < 1000:
-            big_nums = [float(x.replace(",", "")) for x in re.findall(r"\b\d{5,7}\b", raw)]
-            if big_nums:
-                net = max(big_nums)
+        g_m = re.search(r"GROSS\s*[:=]\s*([\d,]+)", clean_text, re.IGNORECASE)
+        n_m = re.search(r"NET\s*[:=]\s*([\d,]+)", clean_text, re.IGNORECASE)
+        b_m = re.search(r"BOXES\s*[:=]\s*(\d+)", clean_text, re.IGNORECASE)
 
-        if boxes <= 0:
-            small_nums = [float(x) for x in re.findall(r"\b([1-9]|[1-9]\d)\b", raw)]
+        if g_m: gross = float(g_m.group(1).replace(",", ""))
+        if n_m: net = float(n_m.group(1).replace(",", ""))
+        if b_m: boxes = float(b_m.group(1))
+
+        # تطبيق القواعد الحسابية والربط في حال نقص أحد الأرقام:
+        # 1. إذا كان الإجمالي موجوداً والصافي مفقوداً: الصافي = الإجمالي - 3%
+        if gross > 0 and net == 0:
+            net = round(gross * 0.97)
+
+        # 2. إذا كان الصافي موجوداً والإجمالي مفقوداً: الإجمالي = الصافي / 0.97
+        if net > 0 and gross == 0:
+            gross = round(net / 0.97)
+
+        # 3. إذا لم يحدد الصناديق بشكل مباشر، البحث عن الصناديق في النص
+        if boxes == 0:
+            small_nums = [float(x) for x in re.findall(r"\b([1-9]|1[0-9])\b", clean_text)]
             if small_nums:
                 boxes = small_nums[0]
 
         return {
             "boxes_count": boxes,
             "invoice_net_amount": net,
+            "gross_amount": gross,
             "currency": "ريال يمني"
         }
 
     except Exception as e:
         return {"error": str(e)}
-
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.photo:
