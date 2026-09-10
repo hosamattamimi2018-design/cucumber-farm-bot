@@ -432,26 +432,30 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
     try:
         img = Image.open(io.BytesIO(image_bytes))
         img = ImageOps.exif_transpose(img)
-        img.thumbnail((1200, 1200))
+        img.thumbnail((1024, 1024))
         
         buffered = io.BytesIO()
-        img.save(buffered, format="JPEG", quality=85)
+        img.save(buffered, format="JPEG", quality=80)
         base64_image = base64.b64encode(buffered.getvalue()).decode('utf-8')
 
-        prompt = """
-        أنت محاسب زراعي خبير في قراءة فواتير الحراج المركزي بوادي حضرموت - اليمن.
-        اقرأ صورة الفاتورة واستخرج:
-        1. boxes_count: إجمالي عدد الصناديق المباعة (اجمع قيم عمود الكمية).
-        2. invoice_net_amount: المبلغ المتبقي بعد الخصم المكتوب تحت خانة (الرصيد المتبقي).
-        3. currency: العملة ("ريال يمني").
-        4. invoice_no: رقم الفاتورة إن وجد.
-
-        أرجع النتيجة بصيغة JSON فقط دون أي شروح إضافية بالشكل التالي:
-        {"boxes_count": 9, "invoice_net_amount": 118825, "currency": "ريال يمني", "invoice_no": "21400"}
-        """
+        prompt = (
+            "You are an expert accountant reading agricultural market invoices in Yemen.\n"
+            "Analyze the image and return ONLY a valid JSON object with these keys:\n"
+            "{\n"
+            '  "boxes_count": <total integer number of boxes sold>,\n'
+            '  "invoice_net_amount": <final net amount remaining after market commission/discount>,\n'
+            '  "currency": "ريال يمني",\n'
+            '  "invoice_no": "<invoice number if visible>"\n'
+            "}\n"
+            "Do not add any explanations, markdown markers, or extra text."
+        )
 
         chat_completion = groq_client.chat.completions.create(
             messages=[
+                {
+                    "role": "system",
+                    "content": "You are a JSON-only response engine. Always return valid JSON."
+                },
                 {
                     "role": "user",
                     "content": [
@@ -466,13 +470,20 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
                 }
             ],
             model="qwen/qwen3.6-27b",
-            max_tokens=300,
-            response_format={"type": "json_object"}
+            max_tokens=250,
+            temperature=0.1
         )
 
-        content = chat_completion.choices[0].message.content
-        data = json.loads(content)
-        return data
+        content = chat_completion.choices[0].message.content.strip()
+        
+        # استخراج كائن JSON بأمان حتى لو أحاطه الموديل بأسوار برمجية
+        json_match = re.search(r"\{[\s\S]*\}", content)
+        if json_match:
+            data = json.loads(json_match.group(0))
+            return data
+        else:
+            return {"error": f"لم يتم العثور على أرقام الفاتورة في الرد: {content}"}
+
     except Exception as e:
         return {"error": str(e)}
 
