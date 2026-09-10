@@ -454,8 +454,8 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
         image = ImageOps.exif_transpose(image)  # تصحيح تدوير الصورة تلقائياً
         
         # استخدام موديل 1.5 flash المتوافق
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        response = model.generate_content([prompt, image])
+       model = genai.GenerativeModel('gemini-2.0-flash')
+response = model.generate_content([prompt, image])
         
         text = response.text.replace("```json", "").replace("```", "").strip()
         data = json.loads(text)
