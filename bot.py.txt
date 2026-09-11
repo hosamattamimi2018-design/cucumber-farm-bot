@@ -47,7 +47,7 @@ SPREADSHEET_URL = (
 CREDENTIALS_FILE = "credentials.json"
 SHEET_NAME = "Sheet1"
 
-# حالات المحادثة التفاعلية للفاتورة
+# حالات المحادثة التفاعلية لإضافة الفاتورة
 WAIT_BOXES, WAIT_NET, WAIT_PHOTO = range(3)
 
 
@@ -342,14 +342,15 @@ async def notify_admins(context: ContextTypes.DEFAULT_TYPE, message_text: str, s
             try:
                 await context.bot.send_message(
                     chat_id=admin_id,
-                    text=message_text
+                    text=message_text,
+                    parse_mode="Markdown"
                 )
             except Exception as e:
                 print(f"Failed to notify admin {admin_id}: {e}")
 
 
 # =========================================================
-# معالجة الفواتير (تفاعلي خطوة بخطوة + بالوصف)
+# معالجة الفواتير (تفاعلي + يدوي)
 # =========================================================
 
 def process_invoice_entry(boxes: float, invoice_net: float, currency: str, user_name: str) -> str:
@@ -377,7 +378,6 @@ def process_invoice_entry(boxes: float, invoice_net: float, currency: str, user_
     )
     return summary
 
-# بدء المحادثة التفاعلية
 async def invoice_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
         await update.callback_query.answer()
@@ -425,10 +425,9 @@ async def invoice_get_net(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def invoice_finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
     boxes = context.user_data.get("invoice_boxes", 0.0)
     net_amt = context.user_data.get("invoice_net", 0.0)
-    user_name = update.effective_user.first_name or "مستخدم"
+    user_name = update.effective_user.first_name or "حسام"
 
     summary = process_invoice_entry(boxes, net_amt, "ريال يمني", user_name)
-
     await update.message.reply_text(summary, parse_mode="Markdown")
     await notify_admins(context, summary, update.effective_chat.id)
 
@@ -440,7 +439,6 @@ async def invoice_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ تم إلغاء تسجيل الفاتورة.")
     return ConversationHandler.END
 
-# إمكانية إرسال الصورة مع الكابشن مباشرة دون الدخول في المحادثة
 async def handle_direct_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.photo:
         return
@@ -452,17 +450,72 @@ async def handle_direct_photo(update: Update, context: ContextTypes.DEFAULT_TYPE
         boxes = caption_nums[0]
         invoice_net = caption_nums[1]
         currency = detect_currency(caption)
-        user_name = update.effective_user.first_name or "مستخدم"
+        user_name = update.effective_user.first_name or "حسام"
 
         summary = process_invoice_entry(boxes, invoice_net, currency, user_name)
         await update.message.reply_text(summary, parse_mode="Markdown")
         await notify_admins(context, summary, update.effective_chat.id)
     else:
         await update.message.reply_text(
-            "💡 *لتسجيل هذه الفاتورة بسهولة:*\n"
-            "اضغط على زر *«📥 إضافة فاتورة مبيعات»* من القائمة بالأسفل، أو أعد إرسال الصورة واكتب في وصفها: عدد الصناديق والمبلغ (مثال: `9 118825`).",
+            "💡 *لتسجيل هذه الفاتورة:*\n"
+            "اضغط على زر *«📥 إضافة فاتورة مبيعات»* من القائمة، أو أعد إرسال الصورة واكتب في وصفها: عدد الصناديق والمبلغ (مثال: `9 118825`).",
             parse_mode="Markdown"
         )
+
+
+# =========================================================
+# معالجة الصرافة
+# =========================================================
+
+async def handle_exchange(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+    norm_text = convert_arabic_numbers(text)
+    pattern = r"^صرف\s+(\d+(?:\.\d+)?)\s*(?:سعودي|ر\.س|رس)?\s*بسعر\s*(\d+(?:\.\d+)?)"
+    match = re.search(pattern, norm_text, re.IGNORECASE)
+
+    if not match:
+        return False
+
+    sar_amount = float(match.group(1))
+    rate = float(match.group(2))
+    yer_amount = sar_amount * rate
+
+    transaction_id = generate_transaction_id()
+    date_string = get_date_string()
+    balances = calculate_balances()
+    user_name = update.effective_user.first_name or "حسام"
+
+    new_sar_balance = balances["ريال سعودي"] - sar_amount
+    new_yer_balance = balances["ريال يمني"] + yer_amount
+
+    if sheet:
+        sheet.append_row([
+            date_string, "تحويل عملة", "صرافة",
+            f"صرف {sar_amount} ريال سعودي بسعر {rate}",
+            -sar_amount, "ريال سعودي", "صرافة",
+            new_sar_balance, f"تحويل سعودي إلى يمني بسعر {rate}",
+            transaction_id, user_name
+        ])
+
+        sheet.append_row([
+            date_string, "تحويل عملة", "صرافة",
+            f"استلام {yer_amount} ريال يمني",
+            yer_amount, "ريال يمني", "صرافة",
+            new_yer_balance, f"مقابل {sar_amount} ريال سعودي بسعر {rate}",
+            transaction_id, user_name
+        ])
+
+    reply = (
+        f"💱 *صرافة:* {sar_amount:,.0f} ر.س\n"
+        f"💵 *المستلم:* {yer_amount:,.0f} ر.ي\n"
+        f"📈 *السعر:* {rate:,.0f}\n"
+        f"🇸🇦 *رصيد سعودي:* {new_sar_balance:,.0f}\n"
+        f"🇾🇪 *رصيد يمني:* {new_yer_balance:,.0f}"
+    )
+
+    await update.message.reply_text(reply, parse_mode="Markdown")
+    await notify_admins(context, reply, update.effective_chat.id)
+
+    return True
 
 
 # =========================================================
@@ -720,163 +773,173 @@ def generate_pdf_report():
 
 
 # =========================================================
-# معالجة الصرافة
-# =========================================================
-
-async def handle_exchange(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
-    norm_text = convert_arabic_numbers(text)
-    pattern = r"^صرف\s+(\d+(?:\.\d+)?)\s*(?:سعودي|ر\.س|رس)?\s*بسعر\s*(\d+(?:\.\d+)?)"
-    match = re.search(pattern, norm_text, re.IGNORECASE)
-
-    if not match:
-        return False
-
-    sar_amount = float(match.group(1))
-    rate = float(match.group(2))
-    yer_amount = sar_amount * rate
-
-    transaction_id = generate_transaction_id()
-    date_string = get_date_string()
-    balances = calculate_balances()
-    user_name = update.effective_user.first_name or "مستخدم"
-
-    new_sar_balance = balances["ريال سعودي"] - sar_amount
-    new_yer_balance = balances["ريال يمني"] + yer_amount
-
-    if sheet:
-        sheet.append_row([
-            date_string, "تحويل عملة", "صرافة",
-            f"صرف {sar_amount} ريال سعودي بسعر {rate}",
-            -sar_amount, "ريال سعودي", "صرافة",
-            new_sar_balance, f"تحويل سعودي إلى يمني بسعر {rate}",
-            transaction_id, user_name
-        ])
-
-        sheet.append_row([
-            date_string, "تحويل عملة", "صرافة",
-            f"استلام {yer_amount} ريال يمني",
-            yer_amount, "ريال يمني", "صرافة",
-            new_yer_balance, f"مقابل {sar_amount} ريال سعودي بسعر {rate}",
-            transaction_id, user_name
-        ])
-
-    reply = (
-        f"💱 صرافة: {sar_amount:,.0f} ر.س\n"
-        f"💵 المستلم: {yer_amount:,.0f} ر.ي\n"
-        f"📈 السعر: {rate:,.0f}\n"
-        f"🇸🇦 رصيد سعودي: {new_sar_balance:,.0f}\n"
-        f"🇾🇪 رصيد يمني: {new_yer_balance:,.0f}"
-    )
-
-    await update.message.reply_text(reply)
-    await notify_admins(context, reply, update.effective_chat.id)
-
-    return True
-
-
-# =========================================================
-# الرسائل والأزرار والقوائم
+# واجهة الأزرار (تم وضع "إضافة فاتورة مبيعات" بدلاً من "بيع الخيار")
 # =========================================================
 
 def get_main_keyboard():
     keyboard = [
         [
-            InlineKeyboardButton("📥 إضافة فاتورة مبيعات", callback_data="cmd_invoice_start"),
-            InlineKeyboardButton("🏦 رصيد الكاش", callback_data="cmd_balance")
+            InlineKeyboardButton("⚖️ تسجيل الإنتاج", callback_data="ui_prod"),
+            InlineKeyboardButton("📥 إضافة فاتورة مبيعات", callback_data="cmd_invoice_start")
         ],
         [
-            InlineKeyboardButton("📊 تقرير اليوم", callback_data="cmd_today"),
-            InlineKeyboardButton("📅 التقرير الشهري", callback_data="cmd_month")
+            InlineKeyboardButton("👷 أجور العمال", callback_data="ui_labor"),
+            InlineKeyboardButton("💸 تسجيل مصروف", callback_data="ui_exp")
         ],
         [
-            InlineKeyboardButton("📈 الأرباح الكاملة", callback_data="cmd_profits"),
-            InlineKeyboardButton("📑 الديون والآجل", callback_data="cmd_debts")
+            InlineKeyboardButton("💧 مياه وري", callback_data="ui_water"),
+            InlineKeyboardButton("🧪 أسمدة ومبيدات", callback_data="ui_fert")
         ],
         [
-            InlineKeyboardButton("📄 تصدير PDF", callback_data="cmd_pdf"),
-            InlineKeyboardButton("🔄 تراجع (حذف الأخيرة)", callback_data="cmd_undo")
+            InlineKeyboardButton("📦 تغليف وكراتين", callback_data="ui_pack"),
+            InlineKeyboardButton("⛽ وقود وطاقة", callback_data="ui_fuel")
         ],
         [
-            InlineKeyboardButton("🔗 فتح شيت قوقل", url=SPREADSHEET_URL)
+            InlineKeyboardButton("🏦 رصيد الكاش", callback_data="cmd_balance"),
+            InlineKeyboardButton("💱 صرافة", callback_data="ui_ex")
+        ],
+        [
+            InlineKeyboardButton("📅 التقرير الشهري", callback_data="cmd_month"),
+            InlineKeyboardButton("📊 تقرير اليوم", callback_data="cmd_today")
+        ],
+        [
+            InlineKeyboardButton("📑 الديون والآجل", callback_data="cmd_debts"),
+            InlineKeyboardButton("📈 الأرباح والصافي", callback_data="cmd_profits")
+        ],
+        [
+            InlineKeyboardButton("🔗 فتح شيت قوقل", url=SPREADSHEET_URL),
+            InlineKeyboardButton("📄 تصدير تقرير PDF", callback_data="cmd_pdf")
+        ],
+        [
+            InlineKeyboardButton("🔄 حذف آخر عملية", callback_data="cmd_undo")
         ]
     ]
     return InlineKeyboardMarkup(keyboard)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_name = update.effective_user.first_name or "أخي الكريم"
+    welcome_text = (
+        "🌱 *أهلاً بك حسام في نظام إدارة مشروع المحمية* 🥒\n\n"
+        "يمكنك إرسال العمليات نصياً أو الضغط على *«📥 إضافة فاتورة مبيعات»* لتسجيل الفاتورة وحساب التكييس والنقل والصافي تلقائياً.\n\n"
+        "*أمثلة سريعة:*\n"
+        "📸 أرسل صورة فاتورة الحراج واكتب في وصفها: `9 118825`\n"
+        "⚖️ إنتاج اليوم 750 كيلو\n"
+        "🧪 سماد 25000 يمني\n"
+        "👷 أجرة عمال 150 سعودي\n"
+        "💱 صرف 100 سعودي بسعر 535\n\n"
+        "اختر من القائمة أو أرسل عمليتك مباشرة:"
+    )
     await update.message.reply_text(
-        f"🌱 *أهلاً بك {user_name} في نظام إدارة المحمية*\n\n"
-        "يمكنك الضغط على *«📥 إضافة فاتورة مبيعات»* لتسجيل الفاتورة وحساب التكييس والنقل والصافي تلقائياً، أو استخدم الأزرار أدناه:",
+        welcome_text,
         reply_markup=get_main_keyboard(),
         parse_mode="Markdown"
     )
 
+
+# =========================================================
+# معالجة ضغطات الأزرار
+# =========================================================
+
 async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    action = query.data
+    data = query.data
 
-    if action == "cmd_balance":
+    if data == "cmd_balance":
         balances = calculate_balances()
         await query.message.reply_text(
-            f"🇸🇦 سعودي: {balances['ريال سعودي']:,.0f} ر.س\n"
-            f"🇾🇪 يمني: {balances['ريال يمني']:,.0f} ر.ي"
+            f"🏦 *رصيد الكاش المتوفر حالياً:*\n"
+            f"🇸🇦 سعودي: *{balances['ريال سعودي']:,.0f}* ر.س\n"
+            f"🇾🇪 يمني: *{balances['ريال يمني']:,.0f}* ر.ي",
+            parse_mode="Markdown"
         )
-    elif action == "cmd_today":
+    elif data == "cmd_today":
         report = get_today_report()
         await query.message.reply_text(
-            f"📊 اليوم: {get_today_string()}\n"
-            f"⚖️ إنتاج: {report['production']:,.0f} كجم\n\n"
-            f"🇸🇦 صافي سعودي: {(report['sar_income'] - report['sar_expense']):,.0f}\n"
-            f"🇾🇪 صافي يمني: {(report['yer_income'] - report['yer_expense']):,.0f}"
+            f"📊 *تقرير اليوم* ({get_today_string()}):\n"
+            f"⚖️ إجمالي الحصاد: *{report['production']:,.0f}* كجم\n\n"
+            f"🇸🇦 إيراد سعودي: *{report['sar_income']:,.0f}* | مصروف: *{report['sar_expense']:,.0f}*\n"
+            f"🇸🇦 صافي اليوم: *{(report['sar_income'] - report['sar_expense']):,.0f}* ر.س\n\n"
+            f"🇾🇪 إيراد يمني: *{report['yer_income']:,.0f}* | مصروف: *{report['yer_expense']:,.0f}*\n"
+            f"🇾🇪 صافي اليوم: *{(report['yer_income'] - report['yer_expense']):,.0f}* ر.ي",
+            parse_mode="Markdown"
         )
-    elif action == "cmd_month":
+    elif data == "cmd_month":
         report = get_month_report()
         month = get_now().strftime("%Y-%m")
         await query.message.reply_text(
-            f"📅 شهر: {month}\n"
-            f"⚖️ إنتاج: {report['production']:,.0f} كجم\n\n"
-            f"🇸🇦 صافي سعودي: {(report['sar_income'] - report['sar_expense']):,.0f}\n"
-            f"🇾🇪 صافي يمني: {(report['yer_income'] - report['yer_expense']):,.0f}"
+            f"📅 *تقرير شهر* ({month}):\n"
+            f"⚖️ إجمالي إنتاج الشهر: *{report['production']:,.0f}* كجم\n\n"
+            f"🇸🇦 صافي سعودي: *{(report['sar_income'] - report['sar_expense']):,.0f}* ر.س\n"
+            f"🇾🇪 صافي يمني: *{(report['yer_income'] - report['yer_expense']):,.0f}* ر.ي",
+            parse_mode="Markdown"
         )
-    elif action == "cmd_profits":
+    elif data == "cmd_profits":
         report = get_profit_report()
         await query.message.reply_text(
-            f"📈 الأرباح الكاملة للمشروع:\n"
-            f"⚖️ إجمالي الإنتاج: {report['production']:,.0f} كجم\n"
-            f"🇸🇦 صافي سعودي: {report['sar_profit']:,.0f}\n"
-            f"🇾🇪 صافي يمني: {report['yer_profit']:,.0f}"
+            f"📈 *الأرباح والإنتاج الكامل للمشروع:*\n"
+            f"⚖️ إجمالي الإنتاج: *{report['production']:,.0f}* كجم\n\n"
+            f"🇸🇦 صافي أرباح سعودي: *{report['sar_profit']:,.0f}* ر.س\n"
+            f"🇾🇪 صافي أرباح يمني: *{report['yer_profit']:,.0f}* ر.ي",
+            parse_mode="Markdown"
         )
-    elif action == "cmd_debts":
+    elif data == "cmd_debts":
         sar_debt, yer_debt = get_debts()
         await query.message.reply_text(
-            f"📑 الديون المسجلة:\n🇸🇦 سعودي: {sar_debt:,.0f}\n🇾🇪 يمني: {yer_debt:,.0f}"
+            f"📑 *الديون والآجل المسجل:*\n"
+            f"🇸🇦 ديون سعودي: *{sar_debt:,.0f}* ر.س\n"
+            f"🇾🇪 ديون يمني: *{yer_debt:,.0f}* ر.ي",
+            parse_mode="Markdown"
         )
-    elif action == "cmd_pdf":
-        await query.message.reply_text("⏳ جاري إنشاء تقرير PDF...")
+    elif data == "cmd_pdf":
+        await query.message.reply_text("⏳ جاري توليد تقرير PDF المالي...")
         try:
             pdf_file = generate_pdf_report()
             today_str = get_today_string()
             await query.message.reply_document(
                 document=pdf_file,
                 filename=f"Report_{today_str}.pdf",
-                caption=f"📄 تقرير {today_str}"
+                caption=f"📄 تقرير المحمية المالي ليوم {today_str}"
             )
         except Exception as e:
-            await query.message.reply_text(f"❌ {e}")
-    elif action == "cmd_undo":
+            await query.message.reply_text(f"❌ خطأ أثناء إنشاء التقرير: {e}")
+    elif data == "cmd_undo":
         if not sheet:
             await query.message.reply_text("⚠️ لم يتم الاتصال بالشيت بعد")
             return
         records = sheet.get_all_values()
         if len(records) <= 1:
-            await query.message.reply_text("⚠️ لا توجد عمليات لحذفها")
+            await query.message.reply_text("⚠️ لا توجد عمليات مسجلة لحذفها")
             return
         last_row = records[-1]
         sheet.delete_rows(len(records))
-        reply = f"🔄 تم حذف آخر عملية:\n{last_row[1]} | {last_row[4]} {last_row[5]}"
-        await query.message.reply_text(reply)
+        reply = (
+            f"🔄 *تم حذف آخر عملية بنجاح:*\n"
+            f"النوع: {last_row[1]} | المبلغ: {last_row[4]} {last_row[5]}\n"
+            f"البيان: {last_row[3]}"
+        )
+        await query.message.reply_text(reply, parse_mode="Markdown")
         await notify_admins(context, reply, update.effective_chat.id)
+    elif data == "ui_prod":
+        await query.message.reply_text("⚖️ *لتسجيل الإنتاج:* أرسل رسالة بالكمية مباشرة مثل:\n`إنتاج اليوم 750 كيلو` أو `حصاد 500 كجم`", parse_mode="Markdown")
+    elif data == "ui_labor":
+        await query.message.reply_text("👷 *لتسجيل أجور العمال:* أرسل رسالة مثل:\n`أجرة عمال 150 سعودي` أو `أجور عمال 50000 يمني`", parse_mode="Markdown")
+    elif data == "ui_exp":
+        await query.message.reply_text("💸 *لتسجيل أي مصروف عام:* أرسل التفاصيل والمبلغ مثل:\n`صيانة مضخة 15000 يمني` أو `شراء مقصات 50 سعودي`", parse_mode="Markdown")
+    elif data == "ui_water":
+        await query.message.reply_text("💧 *لتسجيل مياه وري:* أرسل مثل:\n`وايت ماء 12000 يمني` أو `ماء ري 50 سعودي`", parse_mode="Markdown")
+    elif data == "ui_fert":
+        await query.message.reply_text("🧪 *لتسجيل أسمدة ومبيدات:* أرسل مثل:\n`سماد يوريا 25000 يمني` أو `مبيد حشري 70 سعودي`", parse_mode="Markdown")
+    elif data == "ui_pack":
+        await query.message.reply_text("📦 *لتسجيل التغليف والكراتين:* أرسل مثل:\n`شراء كراتين 30000 يمني` أو `سلات 100 سعودي`", parse_mode="Markdown")
+    elif data == "ui_fuel":
+        await query.message.reply_text("⛽ *لتسجيل الوقود والطاقة:* أرسل مثل:\n`ديزل 40000 يمني` أو `بنزين 25000 يمني`", parse_mode="Markdown")
+    elif data == "ui_ex":
+        await query.message.reply_text("💱 *لتسجيل عملية صرافة:* أرسل رسالة بهذه الصيغة:\n`صرف 100 سعودي بسعر 535`", parse_mode="Markdown")
+
+
+# =========================================================
+# معالجة الرسائل النصية المباشرة
+# =========================================================
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
@@ -886,15 +949,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not raw_text:
         return
 
+    # صرافة
     if raw_text.startswith("صرف"):
         if await handle_exchange(update, context, raw_text):
             return
 
+    # فاتورة سريعة بنص
+    if raw_text.startswith("فاتورة") or raw_text.startswith("فاتوره"):
+        nums = extract_numbers(raw_text)
+        if len(nums) >= 2:
+            boxes = nums[0]
+            invoice_net = nums[1]
+            currency = detect_currency(raw_text)
+            user_name = update.effective_user.first_name or "حسام"
+
+            summary = process_invoice_entry(boxes, invoice_net, currency, user_name)
+            await update.message.reply_text(summary, parse_mode="Markdown")
+            await notify_admins(context, summary, update.effective_chat.id)
+            return
+
+    # باقي العمليات (إنتاج أو مصروفات)
     transaction = analyze_message(raw_text)
     if transaction["amount"] == 0 and transaction["type"] != "إنتاج":
         return
 
-    user_name = update.effective_user.first_name or "مستخدم"
+    user_name = update.effective_user.first_name or "حسام"
     result = add_transaction(
         transaction_type=transaction["type"],
         category=transaction["category"],
@@ -907,11 +986,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     reply = (
-        f"🏷️ النوع: {transaction['type']}\n"
-        f"💰 المبلغ: {abs(transaction['amount']):,.0f} {transaction['currency']}\n"
-        f"🏦 الرصيد: {result['balance']:,.0f} {transaction['currency']}"
+        f"🏷️ *النوع:* {transaction['type']}\n"
+        f"📋 *الفئة:* {transaction['category']}\n"
+        f"💰 *المبلغ / الكمية:* {abs(transaction['amount']):,.0f} {transaction['currency']}\n"
+        f"🏦 *الرصيد:* {result['balance']:,.0f} {transaction['currency']}"
     )
-    await update.message.reply_text(reply)
+    await update.message.reply_text(reply, parse_mode="Markdown")
+    await notify_admins(context, reply, update.effective_chat.id)
 
 
 # =========================================================
@@ -924,7 +1005,7 @@ if __name__ == "__main__":
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # محادثة إدخال الفاتورة التفاعلية
+    # محادثة إدخال الفاتورة التفاعلية لزر "إضافة فاتورة مبيعات"
     invoice_conv_handler = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(invoice_start, pattern="^cmd_invoice_start$"),
@@ -949,7 +1030,7 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     print("=" * 50)
-    print("🤖 بوت إدارة المحمية جاهز ويعمل الآن بنظام الإدخال التفاعلي")
+    print("🤖 بوت إدارة المحمية يعمل بكامل الأزرار مع ميزة إضافة الفاتورة التفاعلية")
     print("=" * 50)
 
     app.run_polling(drop_pending_updates=True)
