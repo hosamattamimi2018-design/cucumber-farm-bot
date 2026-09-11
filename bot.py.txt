@@ -422,17 +422,104 @@ async def notify_admins(context: ContextTypes.DEFAULT_TYPE, message_text: str, s
 # معالجة وتدوير وتدقيق الفاتورة حسابياً بالذكاء الاصطناعي
 # =========================================================
 
-=> Setting WEB_CONCURRENCY=1 by default, based on available CPUs in the instance
-==> Running 'python bot.py.txt'
-Traceback (most recent call last):
-  File "/opt/render/project/src/bot.py.txt", line 449, in <module>
-    "url": f"data:image/jpeg;base64,{base64_image}",
-                                     ^^^^^^^^^^^^
-NameError: name 'base64_image' is not defined
-==> Exited with status 1
-==> Common ways to troubleshoot your deploy: https://render.com/docs/troubleshooting-deploys
-==> Running 'python bot.py.txt'
+def parse_invoice_image(image_bytes: bytes) -> dict:
+    if not groq_client:
+        return {"error": "لم يتم ضبط مفتاح GROQ_API_KEY"}
 
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        img = ImageOps.exif_transpose(img)
+
+        # ضبط اتجاه الصورة تلقائياً إذا كانت عرضية لضمان قراءة الترويسة في الأعلى
+        if img.width > img.height:
+            img = img.rotate(-90, expand=True)
+
+        gray_img = img.convert('L')
+        auto_img = ImageOps.autocontrast(gray_img, cutoff=2)
+        enhancer = ImageEnhance.Contrast(auto_img)
+        enhanced_img = enhancer.enhance(1.8)
+
+        enhanced_img.thumbnail((1600, 1600))
+        buffered = io.BytesIO()
+        enhanced_img.save(buffered, format="JPEG", quality=95)
+        base64_image = base64.b64encode(buffered.getvalue()).decode('utf-8')
+
+        prompt = (
+            "You are an automated accounting parser for vegetable market invoices.\n"
+            "Analyze the image and extract general invoice data:\n"
+            "1. 'boxes': Sum of all numbers in the quantity column ('الكمية').\n"
+            "2. 'gross': The total amount before discount ('الإجمالي').\n"
+            "3. 'net': The final net balance ('الرصيد المتبقي').\n\n"
+            "Rules:\n"
+            "- If 'net' is unclear, calculate it: net = gross * 0.97 (3% market fee deduction).\n"
+            "- Return strictly integer numbers.\n"
+            "- Output JSON ONLY with this exact format:\n"
+            '{"boxes": <number>, "gross": <number>, "net": <number>}'
+        )
+
+        chat_completion = groq_client.chat.completions.create(
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a specialized invoice JSON parser. Output only valid JSON without explanations."
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{base64_image}",
+                            },
+                        },
+                    ],
+                }
+            ],
+            model="llama-3.2-90b-vision-preview",
+            temperature=0.0,
+            max_tokens=150
+        )
+
+        raw = chat_completion.choices[0].message.content.strip()
+
+        boxes = 0.0
+        gross = 0.0
+        net = 0.0
+
+        json_match = re.search(r"\{[^{}]*\}", raw)
+        if json_match:
+            try:
+                data = json.loads(json_match.group(0))
+                boxes = float(data.get("boxes", 0))
+                gross = float(data.get("gross", 0))
+                net = float(data.get("net", 0))
+            except Exception:
+                pass
+
+        if net == 0 and gross > 0:
+            net = round(gross * 0.97)
+
+        if net == 0:
+            big_nums = [float(x.replace(",", "")) for x in re.findall(r"\b\d{5,7}\b", raw)]
+            if big_nums:
+                valid_amounts = [n for n in big_nums if n != 21400]
+                if len(valid_amounts) >= 2:
+                    gross = max(valid_amounts)
+                    net = min(valid_amounts)
+                elif len(valid_amounts) == 1:
+                    gross = valid_amounts[0]
+                    net = round(gross * 0.97)
+
+        return {
+            "boxes_count": boxes,
+            "invoice_net_amount": net,
+            "currency": "ريال يمني",
+            "raw_debug": raw
+        }
+
+    except Exception as e:
+        return {"error": str(e)}
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1066,7 +1153,7 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         report = get_profit_report()
         await query.message.reply_text(
             f"📈 الأرباح الكاملة:\n"
-            f"⚖️ الإنتاج: {report['production']:,.0f} كجم\n"
+            f"⚖️ الإنتاج: {report['production']:,.0f} كجم\n\n"
             f"🇸🇦 صافي سعودي: {report['sar_profit']:,.0f}\n"
             f"🇾🇪 صافي يمني: {report['yer_profit']:,.0f}"
         )
