@@ -357,6 +357,11 @@ async def notify_admins(context: ContextTypes.DEFAULT_TYPE, message_text: str, s
 
 def parse_invoice_image(image_bytes: bytes) -> dict:
     try:
+        # استخدام ملف الحساب الخدمي لتوليد OAuth 2.0 Access Token رسمي
+        scope = ["https://www.googleapis.com/auth/cloud-platform"]
+        sa_creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
+        access_token = sa_creds.get_access_token().access_token
+
         img = Image.open(io.BytesIO(image_bytes))
         img = ImageOps.exif_transpose(img)
 
@@ -384,7 +389,8 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
         
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {GEMINI_AUTH_KEY}"
+            "Authorization": f"Bearer {access_token}",
+            "x-goog-user-project": sa_creds.project_id
         }
 
         payload = {
