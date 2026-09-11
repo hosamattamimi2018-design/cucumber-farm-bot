@@ -476,7 +476,7 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
                     ],
                 }
             ],
-            model="llama-3.2-90b-vision-preview",
+           model="llama-3.2-11b-vision-preview",
             temperature=0.0,
             max_tokens=150
         )
