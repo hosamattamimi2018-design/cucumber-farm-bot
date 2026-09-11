@@ -22,11 +22,9 @@ from telegram.ext import (
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-# مكتبة الذكاء الاصطناعي للرؤية والمعالجة المسبقة للصور
 from groq import Groq
 from PIL import Image, ImageOps, ImageEnhance
 
-# مكتبات الـ PDF واللغة العربية
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -38,7 +36,7 @@ from bidi.algorithm import get_display
 
 
 # =========================================================
-# الإعدادات وأرقام المديرين والمفاتيح
+# الإعدادات والمفاتيح
 # =========================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8943498488:AAFbsQw7oPJqqADrxYdo3k7eC1lZe5jgqm4")
@@ -421,7 +419,7 @@ async def notify_admins(context: ContextTypes.DEFAULT_TYPE, message_text: str, s
 
 
 # =========================================================
-# معالجة وتوضيح الصورة وتدقيق الفاتورة حسابياً
+# معالجة وتدوير وتدقيق الفاتورة حسابياً بالذكاء الاصطناعي
 # =========================================================
 
 def parse_invoice_image(image_bytes: bytes) -> dict:
@@ -429,22 +427,20 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
         return {"error": "لم يتم ضبط مفتاح GROQ_API_KEY"}
 
     try:
-        # 1. فتح الصورة وضبط الاتجاه
         img = Image.open(io.BytesIO(image_bytes))
         img = ImageOps.exif_transpose(img)
 
-        # 2. تحويل الصورة إلى تدرج رمادي لإلغاء ألوان ورق الكربون
+        # فحص وتعديل اتجاه الصورة تلقائياً إذا كانت عرضية ومقلوبة (مثل تصوير واتساب)
+        if img.width > img.height:
+            img = img.rotate(270, expand=True)
+
+        # تحويل لتدرج رمادي وإلغاء ألوان ورق الكربون
         gray_img = img.convert('L')
-
-        # 3. موازنة السطوع تلقائياً لجعل الخلفية بيضاء
         auto_img = ImageOps.autocontrast(gray_img, cutoff=2)
-
-        # 4. مضاعفة التباين والحدة لجعل الكتابة اليدوية والمطبوعة سوداء بارزة
         enhancer = ImageEnhance.Contrast(auto_img)
-        enhanced_img = enhancer.enhance(2.0)
-
+        enhanced_img = enhancer.enhance(1.9)
         sharpener = ImageEnhance.Sharpness(enhanced_img)
-        clean_img = sharpener.enhance(1.8)
+        clean_img = sharpener.enhance(1.7)
 
         clean_img.thumbnail((1600, 1600))
         buffered = io.BytesIO()
@@ -453,17 +449,16 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
 
         prompt = (
             "/no_think\n"
-            "أنت مدقق حسابات فواتير السوق المركزي (THE CENTER MARKET) لبيع الخضار والفواكه بوادي حضرموت.\n"
-            "طبق القواعد المحاسبية الصارمة لقراءة الفاتورة:\n"
-            "1. جدول المبيعات: اقرأ كل سطر واجمع كامل عمود الكمية (عدد الصناديق/السلات).\n"
-            "2. خانة الإجمالي: مجموع قيم جميع السطور.\n"
-            "3. خانة الخصم: عمولة السوق (3% من الإجمالي).\n"
+            "أنت محاسب ومدقق فواتير محترف للسوق المركزي (THE CENTER MARKET) لبيع الخضار والفواكه بوادي حضرموت - سيئون.\n"
+            "اقرأ بيانات الفاتورة وطبق القواعد الرياضية الإلزامية:\n"
+            "1. عمود الكمية (عدد الصناديق): اجمع كامل عمود الكميات لكل سطر مبيعات.\n"
+            "2. خانة الإجمالي العام: مجموع مبالغ السطور.\n"
+            "3. عمولة السوق (الخصم 3%): الإجمالي × 0.03.\n"
             "4. الرصيد المتبقي (الصافي): الإجمالي - الخصم.\n"
-            "5. طابق الأرقام مع التفقيط المكتوب بالحروف أسفل الفاتورة.\n\n"
-            "المطلوب استخراجه بدقة بالغة وبدون علامات عشرية:\n"
-            "BOXES: <مجموع عمود الكمية>\n"
+            "5. طابق مع التفقيط المكتوب أسفل الفاتورة (مثال: مائة وثمانية عشر ألف وثمانمائة وخمسة وعشرون ريال).\n\n"
+            "أخرج الأرقام بالريال اليمني كأعداد صحيحة بدون علامات عشرية بالتنسيق التالي حصراً:\n"
+            "BOXES: <مجموع الصناديق>\n"
             "GROSS: <الإجمالي العام>\n"
-            "DISCOUNT: <مبلغ الخصم>\n"
             "NET: <الرصيد المتبقي الصافي>"
         )
 
@@ -483,40 +478,35 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
                 }
             ],
             model="qwen/qwen3.6-27b",
-            max_tokens=400,
+            max_tokens=300,
             temperature=0.0
         )
 
-        raw = chat_completion.choices[0].message.content.strip()
-        clean_text = re.sub(r"<think>[\s\S]*?</think>", "", raw).strip() or raw
+        raw_text = chat_completion.choices[0].message.content.strip()
+        clean_text = re.sub(r"<think>[\s\S]*?</think>", "", raw_text).strip() or raw_text
 
         boxes = 0.0
         gross = 0.0
-        discount = 0.0
         net = 0.0
 
         b_m = re.search(r"BOXES\s*[:=]\s*(\d+)", clean_text, re.IGNORECASE)
         g_m = re.search(r"GROSS\s*[:=]\s*([\d,]+)", clean_text, re.IGNORECASE)
-        d_m = re.search(r"DISCOUNT\s*[:=]\s*([\d,]+)", clean_text, re.IGNORECASE)
         n_m = re.search(r"NET\s*[:=]\s*([\d,]+)", clean_text, re.IGNORECASE)
 
-        if b_m: boxes = float(b_m.group(1))
-        if g_m: gross = float(g_m.group(1).replace(",", ""))
-        if d_m: discount = float(d_m.group(1).replace(",", ""))
-        if n_m: net = float(n_m.group(1).replace(",", ""))
+        if b_m:
+            boxes = float(b_m.group(1))
+        if g_m:
+            gross = float(g_m.group(1).replace(",", ""))
+        if n_m:
+            net = float(n_m.group(1).replace(",", ""))
 
-        # تطبيق القواعد الحسابية الأربع لملء أي خانة باهتة
-        if gross > 0 and discount > 0 and net == 0:
-            net = gross - discount
-        elif gross > 0 and net == 0:
-            discount = round(gross * 0.03)
-            net = gross - discount
+        # تطبيق الحساب الرياضي الترابطي (قاعدة 3%)
+        if gross > 0 and net == 0:
+            net = round(gross * 0.97)
         elif net > 0 and gross == 0:
             gross = round(net / 0.97)
-            discount = gross - net
-        elif gross > 0 and net > 0 and discount == 0:
-            discount = gross - net
 
+        # استخراج احتياطي في حال وجود أرقام صريحة في الرد
         if net == 0:
             large_nums = sorted([float(x.replace(",", "")) for x in re.findall(r"\b\d{5,7}\b", clean_text)], reverse=True)
             if len(large_nums) >= 2:
@@ -535,7 +525,6 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
             "boxes_count": boxes,
             "invoice_net_amount": net,
             "gross_amount": gross,
-            "discount": discount,
             "currency": "ريال يمني",
             "raw_debug": clean_text
         }
@@ -580,7 +569,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if boxes <= 0 or invoice_net <= 0:
             err_msg = (
                 f"⚠️ لم أتمكن من استخراج الأرقام بدقة.\n"
-                f"رد النموذج:\n`{raw_debug[:250]}`\n\n"
+                f"رد النموذج:\n`{raw_debug[:200]}`\n\n"
                 f"اكتب مع الصورة: عدد الصناديق والمبلغ (مثال: `9 118825`)"
             )
             await status_msg.edit_text(err_msg, parse_mode="Markdown")
