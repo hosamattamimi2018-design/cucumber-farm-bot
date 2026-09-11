@@ -433,12 +433,29 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
         return {"error": "لم يتم ضبط مفتاح GROQ_API_KEY"}
 
     try:
+       try:
+        # 1. فتح الصورة وضبط الاتجاه
         img = Image.open(io.BytesIO(image_bytes))
         img = ImageOps.exif_transpose(img)
-        img.thumbnail((1600, 1600))
+
+        # 2. تحويل الصورة إلى تدرج رمادي لإلغاء ألوان الخلفية الكربونية
+        gray_img = img.convert('L')
+
+        # 3. موازنة السطوع التلقائية لجعل الورقة بيضاء
+        auto_img = ImageOps.autocontrast(gray_img, cutoff=2)
+
+        # 4. مضاعفة التباين والحدة لجعل الأرقام والكتابة سوداء بارزة
+        enhancer = ImageEnhance.Contrast(auto_img)
+        enhanced_img = enhancer.enhance(2.0)  # رفع التباين بمقدار الضعف
+
+        sharpener = ImageEnhance.Sharpness(enhanced_img)
+        clean_img = sharpener.enhance(1.8)    # زيادة حدة الخطوط والأرقام
+
+        # 5. ضبط الحجم النهائي بجودة عالية
+        clean_img.thumbnail((1600, 1600))
         
         buffered = io.BytesIO()
-        img.save(buffered, format="JPEG", quality=95)
+        clean_img.save(buffered, format="JPEG", quality=95)
         base64_image = base64.b64encode(buffered.getvalue()).decode('utf-8')
 
         prompt = (
