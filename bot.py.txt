@@ -310,6 +310,20 @@ def analyze_message(text):
     currency = detect_currency(text)
     quantity = extract_quantity(text)
 
+    # التحقق من الرصيد الأولي / الافتتاحي
+    if any(k in lower_text for k in ["رصيد اولي", "رصيد أولي", "رصيد افتتاحي", "مبلغ اولي", "مبلغ أولي", "عهدة"]):
+        amount = extract_amount(text)
+        return {
+            "type": "رصيد افتتاحي",
+            "category": "رصيد افتتاحي / عهدة",
+            "amount": abs(amount),
+            "currency": currency,
+            "operation": "إيداع",
+            "quantity": 0,
+            "details": text,
+            "explanation": "إيداع رصيد أولي للحساب"
+        }
+
     if any(word in lower_text for word in ["انتاج", "إنتاج", "حصد", "حصاد"]):
         if quantity <= 0:
             quantity = extract_amount(text)
@@ -350,7 +364,7 @@ async def notify_admins(context: ContextTypes.DEFAULT_TYPE, message_text: str, s
 
 
 # =========================================================
-# معالجة الفواتير (تظهر رسالة تم قيد كذا وكذا والرصيد)
+# معالجة الفواتير
 # =========================================================
 
 def process_invoice_entry(boxes: float, invoice_net: float, currency: str, user_name: str) -> str:
@@ -359,7 +373,6 @@ def process_invoice_entry(boxes: float, invoice_net: float, currency: str, user_
     total_deductions = packing_cost + transport_cost
     final_net = invoice_net - total_deductions
 
-    # 1. إيراد المبيعات
     rev_res = add_transaction(
         "إيراد", 
         "مبيعات خيار", 
@@ -371,7 +384,6 @@ def process_invoice_entry(boxes: float, invoice_net: float, currency: str, user_
         user_name
     )
 
-    # 2. تكييس
     add_transaction(
         "مصروف", 
         "تغليف وكراتين", 
@@ -383,7 +395,6 @@ def process_invoice_entry(boxes: float, invoice_net: float, currency: str, user_
         user_name
     )
 
-    # 3. نقل
     add_transaction(
         "مصروف", 
         "نقل وتسويق", 
@@ -473,6 +484,53 @@ async def invoice_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================================================
+# أمر إضافة الرصيد الافتتاحي عبر /initial
+# =========================================================
+
+async def handle_initial_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = " ".join(context.args)
+    if not text:
+        await update.message.reply_text(
+            "💡 *طريقة إضافة الرصيد الأولي:*\n"
+            "أرسل الأمر مع المبلغ والعملة:\n"
+            "`/initial 500000 يمني` أو `/initial 2000 سعودي`\n\n"
+            "أو اكتب مباشرة بدون أمر:\n"
+            "`رصيد اولي 500000 يمني`",
+            parse_mode="Markdown"
+        )
+        return
+
+    amount = extract_amount(text)
+    if amount <= 0:
+        await update.message.reply_text("⚠️ يرجى كتابة مبلغ صحيح أكبر من صفر.")
+        return
+
+    currency = detect_currency(text)
+    user_name = update.effective_user.first_name or "حسام"
+
+    result = add_transaction(
+        transaction_type="رصيد افتتاحي",
+        category="رصيد افتتاحي / عهدة",
+        details=f"إيداع رصيد أولي: {amount:,.0f} {currency}",
+        amount=amount,
+        currency=currency,
+        operation="إيداع",
+        explanation="إيداع رصيد البداية لحسابات المحمية",
+        user_name=user_name
+    )
+
+    reply = (
+        f"🏦 *تم تسجيل الرصيد الأولي بنجاح:*\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"💰 المبلغ المودع: *{amount:,.0f}* {currency}\n"
+        f"📈 إجمالي الرصيد الحالي: *{result['balance']:,.0f}* {currency}\n"
+        f"🔖 رقم العملية: `{result['id']}`"
+    )
+    await update.message.reply_text(reply, parse_mode="Markdown")
+    await notify_admins(context, reply, update.effective_chat.id)
+
+
+# =========================================================
 # معالجة الصرافة
 # =========================================================
 
@@ -531,7 +589,7 @@ async def handle_exchange(update: Update, context: ContextTypes.DEFAULT_TYPE, te
 
 
 # =========================================================
-# التقارير والـ PDF
+# دوال التقارير وتصدير الـ PDF
 # =========================================================
 
 def get_today_report():
@@ -557,12 +615,12 @@ def get_today_report():
             if transaction_type == "إنتاج":
                 res["production"] += abs(amount)
             elif currency == "ريال سعودي":
-                if transaction_type == "إيراد":
+                if transaction_type in ["إيراد", "رصيد افتتاحي"]:
                     res["sar_income"] += abs(amount)
                 elif transaction_type == "مصروف":
                     res["sar_expense"] += abs(amount)
             elif currency == "ريال يمني":
-                if transaction_type == "إيراد":
+                if transaction_type in ["إيراد", "رصيد افتتاحي"]:
                     res["yer_income"] += abs(amount)
                 elif transaction_type == "مصروف":
                     res["yer_expense"] += abs(amount)
@@ -594,12 +652,12 @@ def get_month_report():
             if transaction_type == "إنتاج":
                 res["production"] += abs(amount)
             elif currency == "ريال سعودي":
-                if transaction_type == "إيراد":
+                if transaction_type in ["إيراد", "رصيد افتتاحي"]:
                     res["sar_income"] += abs(amount)
                 elif transaction_type == "مصروف":
                     res["sar_expense"] += abs(amount)
             elif currency == "ريال يمني":
-                if transaction_type == "إيراد":
+                if transaction_type in ["إيراد", "رصيد افتتاحي"]:
                     res["yer_income"] += abs(amount)
                 elif transaction_type == "مصروف":
                     res["yer_expense"] += abs(amount)
@@ -785,7 +843,7 @@ def generate_pdf_report():
 
 
 # =========================================================
-# واجهة الأزرار الكاملة (17 زراً)
+# واجهة الأزرار الكاملة
 # =========================================================
 
 def get_main_keyboard():
@@ -833,11 +891,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🌱 *أهلاً بك حسام في نظام إدارة مشروع المحمية* 🥒\n\n"
         "يمكنك إرسال العمليات نصياً أو الضغط على *«📥 إضافة فاتورة مبيعات»* لتسجيل الفاتورة وحساب التكييس والنقل فوراً.\n\n"
         "*أمثلة سريعة:*\n"
+        "💰 `رصيد اولي 500000 يمني` (أو سعودي)\n"
         "📸 أرسل صورة فاتورة الحراج واكتب في وصفها: `9 118825`\n"
-        "⚖️ إنتاج اليوم 750 كيلو\n"
-        "🧪 سماد 25000 يمني\n"
-        "👷 أجرة عمال 150 سعودي\n"
-        "💱 صرف 100 سعودي بسعر 535\n\n"
+        "⚖️ `إنتاج اليوم 750 كيلو`\n"
+        "🧪 `سماد 25000 يمني`\n"
+        "👷 `أجرة عمال 150 سعودي`\n"
+        "💱 `صرف 100 سعودي بسعر 535`\n\n"
         "اختر من القائمة أو أرسل عمليتك مباشرة:"
     )
     await update.message.reply_text(
@@ -950,7 +1009,7 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================================================
-# معالجة الصور والنصوص
+# معالجة الصور والنصوص وقيد العمليات
 # =========================================================
 
 async def handle_direct_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1003,7 +1062,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await notify_admins(context, summary, update.effective_chat.id)
             return
 
-    # باقي العمليات (إنتاج أو مصروفات)
+    # تحليل العملية (رصيد أولي، إنتاج، أو مصروف)
     transaction = analyze_message(raw_text)
     if transaction["amount"] == 0 and transaction["type"] != "إنتاج":
         return
@@ -1020,7 +1079,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_name=user_name
     )
 
-    action_label = "🟢 تم قيد إيراد" if transaction["type"] == "إيراد" else ("⚖️ تم تسجيل إنتاج" if transaction["type"] == "إنتاج" else "🔴 تم قيد مصروف")
+    if transaction["type"] == "رصيد افتتاحي":
+        action_label = "🏦 تم قيد رصيد أولي"
+    elif transaction["type"] == "إيراد":
+        action_label = "🟢 تم قيد إيراد"
+    elif transaction["type"] == "إنتاج":
+        action_label = "⚖️ تم تسجيل إنتاج"
+    else:
+        action_label = "🔴 تم قيد مصروف"
 
     reply = (
         f"✅ *تم قيد العملية بنجاح:*\n"
@@ -1064,12 +1130,13 @@ if __name__ == "__main__":
 
     app.add_handler(invoice_conv_handler)
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("initial", handle_initial_command))
     app.add_handler(CallbackQueryHandler(handle_buttons))
     app.add_handler(MessageHandler(filters.PHOTO, handle_direct_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     print("=" * 50)
-    print("🤖 بوت إدارة المحمية يعمل بنظام القيد الكامل للأرصدة")
+    print("🤖 بوت إدارة المحمية يعمل بنظام القيد الكامل للأرصدة والمبالغ الأولية")
     print("=" * 50)
 
     app.run_polling(drop_pending_updates=True)
