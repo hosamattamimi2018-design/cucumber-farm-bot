@@ -4,7 +4,6 @@ import datetime
 import re
 import uuid
 import json
-import base64
 import threading
 import urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -22,8 +21,9 @@ from telegram.ext import (
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-from groq import Groq
-from PIL import Image, ImageOps, ImageEnhance
+from google import genai
+from google.genai import types
+from PIL import Image, ImageOps
 
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
@@ -40,9 +40,9 @@ from bidi.algorithm import get_display
 # =========================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8943498488:AAFbsQw7oPJqqADrxYdo3k7eC1lZe5jgqm4")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "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")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
-groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 ADMIN_IDS = [8646384325, 6017996704]
 
@@ -123,10 +123,6 @@ except gspread.WorksheetNotFound:
     )
 
 
-# =========================================================
-# إعداد أعمدة الجدول
-# =========================================================
-
 HEADERS = [
     "التاريخ",
     "النوع",
@@ -141,7 +137,6 @@ HEADERS = [
     "بواسطة"
 ]
 
-
 def ensure_headers():
     first_row = sheet.row_values(1)
     if not first_row:
@@ -151,7 +146,6 @@ def ensure_headers():
             range_name="A1:K1",
             values=[HEADERS]
         )
-
 
 ensure_headers()
 
@@ -166,36 +160,29 @@ def convert_arabic_numbers(text: str) -> str:
     table = str.maketrans(arabic_digits, english_digits)
     return text.translate(table)
 
-
 def format_number(number):
     try:
         return f"{float(number):,.2f}"
     except Exception:
         return "0.00"
 
-
 def format_ar_pdf(text: str) -> str:
     reshaped_text = arabic_reshaper.reshape(str(text))
     return get_display(reshaped_text)
 
-
 def get_now():
     return datetime.datetime.now()
-
 
 def get_date_string():
     return get_now().strftime("%Y-%m-%d %H:%M:%S")
 
-
 def get_today_string():
     return get_now().strftime("%Y-%m-%d")
-
 
 def generate_transaction_id():
     now = get_now().strftime("%Y%m%d%H%M%S")
     short_id = uuid.uuid4().hex[:6].upper()
     return f"CUC-{now}-{short_id}"
-
 
 def detect_currency(text):
     text = convert_arabic_numbers(text).lower()
@@ -203,19 +190,16 @@ def detect_currency(text):
         return "ريال سعودي"
     return "ريال يمني"
 
-
 def extract_numbers(text):
     text = convert_arabic_numbers(text)
     numbers = re.findall(r"\d+(?:\.\d+)?", text)
     return [float(n) for n in numbers]
-
 
 def extract_amount(text):
     numbers = extract_numbers(text)
     if not numbers:
         return 0.0
     return numbers[-1]
-
 
 def extract_quantity(text):
     text = convert_arabic_numbers(text).lower()
@@ -225,22 +209,8 @@ def extract_quantity(text):
     return 0.0
 
 
-def extract_price(text):
-    text = convert_arabic_numbers(text).lower()
-    patterns = [
-        r"بسعر\s*(\d+(?:\.\d+)?)",
-        r"سعر\s*(\d+(?:\.\d+)?)",
-        r"السعر\s*(\d+(?:\.\d+)?)"
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, text)
-        if match:
-            return float(match.group(1))
-    return 0.0
-
-
 # =========================================================
-# حساب الأرصدة
+# حساب الأرصدة وإضافة العمليات
 # =========================================================
 
 def calculate_balances():
@@ -273,14 +243,12 @@ def calculate_balances():
 
     return balances
 
-
 def get_balance_after_transaction(currency, amount, transaction_type):
     balances = calculate_balances()
     current_balance = balances.get(currency, 0.0)
     if transaction_type in ["إنتاج", "آجل / دين"]:
         return current_balance
     return current_balance + amount
-
 
 def add_transaction(
     transaction_type,
@@ -318,7 +286,6 @@ def add_transaction(
         "balance": balance
     }
 
-
 def detect_expense_category(text):
     lower_text = convert_arabic_numbers(text).lower()
     categories = {
@@ -337,12 +304,10 @@ def detect_expense_category(text):
             return category
     return "مصروفات عامة"
 
-
 def analyze_message(text):
     lower_text = convert_arabic_numbers(text).lower()
     currency = detect_currency(text)
     quantity = extract_quantity(text)
-    price = extract_price(text)
 
     if any(word in lower_text for word in ["انتاج", "إنتاج", "حصد", "حصاد"]):
         if quantity <= 0:
@@ -358,37 +323,6 @@ def analyze_message(text):
             "explanation": f"تم تسجيل إنتاج {quantity} كيلو خيار"
         }
 
-    if any(word in lower_text for word in ["بيع", "بعت", "مبيعات", "ايراد", "إيراد", "دخل", "محصول"]):
-        if quantity > 0 and price > 0:
-            amount = quantity * price
-            explanation = f"بيع {quantity:,.2f} كيلو خيار بسعر {price:,.2f} للكيلو"
-        else:
-            amount = extract_amount(text)
-            explanation = "إيراد من بيع محصول الخيار"
-        return {
-            "type": "إيراد",
-            "category": "مبيعات محصول الخيار",
-            "amount": abs(amount),
-            "currency": currency,
-            "operation": "بيع",
-            "quantity": quantity,
-            "details": text,
-            "explanation": explanation
-        }
-
-    if any(word in lower_text for word in ["دين", "آجل", "اجل", "مؤجل", "مؤجلة"]):
-        amount = extract_amount(text)
-        return {
-            "type": "آجل / دين",
-            "category": "ذمم وديون",
-            "amount": abs(amount),
-            "currency": currency,
-            "operation": "آجل",
-            "quantity": 0,
-            "details": text,
-            "explanation": "عملية آجل أو دين"
-        }
-
     amount = extract_amount(text)
     return {
         "type": "مصروف",
@@ -400,11 +334,6 @@ def analyze_message(text):
         "details": text,
         "explanation": "مصروف لمشروع زراعة الخيار"
     }
-
-
-# =========================================================
-# تنبيهات الإدارة
-# =========================================================
 
 async def notify_admins(context: ContextTypes.DEFAULT_TYPE, message_text: str, sender_chat_id: int):
     for admin_id in ADMIN_IDS:
@@ -419,88 +348,50 @@ async def notify_admins(context: ContextTypes.DEFAULT_TYPE, message_text: str, s
 
 
 # =========================================================
-# معالجة وتدوير وتدقيق الفاتورة حسابياً بالذكاء الاصطناعي
+# معالجة الفاتورة عبر Gemini Flash
 # =========================================================
 
 def parse_invoice_image(image_bytes: bytes) -> dict:
-    if not groq_client:
-        return {"error": "لم يتم ضبط مفتاح GROQ_API_KEY"}
+    if not gemini_client:
+        return {"error": "لم يتم ضبط متغير GEMINI_API_KEY في Render"}
 
     try:
         img = Image.open(io.BytesIO(image_bytes))
         img = ImageOps.exif_transpose(img)
 
-        # ضبط اتجاه الصورة تلقائياً لتصبح ترويسة الفاتورة في الأعلى
+        # تعديل اتجاه الصورة تلقائياً إذا كانت مائلة
         if img.width > img.height:
             img = img.rotate(-90, expand=True)
 
-        gray_img = img.convert('L')
-        auto_img = ImageOps.autocontrast(gray_img, cutoff=2)
-        enhancer = ImageEnhance.Contrast(auto_img)
-        enhanced_img = enhancer.enhance(1.8)
-
-        enhanced_img.thumbnail((1600, 1600))
-        buffered = io.BytesIO()
-        enhanced_img.save(buffered, format="JPEG", quality=95)
-        base64_image = base64.b64encode(buffered.getvalue()).decode('utf-8')
-
         prompt = (
-            "/no_think\n"
-            "اقرأ فاتورة السوق المركزي لبيع الخضار في الصورة الرأسية:\n"
-            "1. عمود الكمية: اجمع كل الأرقام الموجودة في عمود الكمية لجميع سطور الخيار.\n"
-            "2. الرصيد المتبقي: اقرأ الرقم المكتوب في خانة 'الرصيد المتبقي' بعد خصم 3% دلالة، والمطابق للتفقيط النصي أسفل الفاتورة.\n\n"
-            "اكتب النتيجة بهذين السطرين فقط:\n"
-            "BOXES: <مجموع الصناديق>\n"
-            "NET: <المبلغ الصافي>"
+            "أنت مدقق محاسبي لفواتير سوق الخضار والفواكه المركزي.\n"
+            "استخرج البيانات التالية بدقة كأرقام صحيحة فقط:\n"
+            "1. boxes: مجموع عمود الكمية (عدد الصناديق/السلات).\n"
+            "2. gross: الإجمالي العام قبل الخصم.\n"
+            "3. net: الرصيد المتبقي الصافي (المطابق للتفقيط المكتوب بالكلمات).\n\n"
+            "إذا تعذر قراءة الصافي: net = gross * 0.97.\n"
+            "أخرج الناتج كـ JSON فقط:\n"
+            '{"boxes": <number>, "gross": <number>, "net": <number>}'
         )
 
-        chat_completion = groq_client.chat.completions.create(
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{base64_image}",
-                            },
-                        },
-                    ],
-                }
-            ],
-            model="qwen/qwen3.6-27b",
-            max_tokens=250,
-            temperature=0.0
+        response = gemini_client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=[img, prompt],
+            config=types.GenerateContentConfig(
+                temperature=0.0,
+                response_mime_type="application/json"
+            )
         )
 
-        raw = chat_completion.choices[0].message.content.strip()
-        clean_text = re.sub(r"<think>[\s\S]*?</think>", "", raw).strip() or raw
+        raw = response.text.strip()
+        data = json.loads(raw)
 
-        boxes = 0.0
-        net = 0.0
+        boxes = float(data.get("boxes", 0))
+        gross = float(data.get("gross", 0))
+        net = float(data.get("net", 0))
 
-        b_m = re.search(r"BOXES\s*[:=]\s*(\d+)", clean_text, re.IGNORECASE)
-        n_m = re.search(r"NET\s*[:=]\s*([\d,]+)", clean_text, re.IGNORECASE)
-
-        if b_m:
-            boxes = float(b_m.group(1))
-        if n_m:
-            net = float(n_m.group(1).replace(",", ""))
-
-        # تأمين استخراج الأرقام إذا كتبها النموذج داخل فقرة
-        if net == 0:
-            big_nums = [float(x.replace(",", "")) for x in re.findall(r"\b\d{5,7}\b", clean_text)]
-            if big_nums:
-                # استبعاد رقم الاستمارة المطبوع
-                valid_amounts = [x for x in big_nums if x not in [21400, 21401]]
-                if valid_amounts:
-                    net = min(valid_amounts)
-
-        if boxes == 0:
-            small_nums = [float(x) for x in re.findall(r"\b([1-9]|1[0-9])\b", clean_text) if float(x) != 3.0]
-            if small_nums:
-                boxes = small_nums[0]
+        if net == 0 and gross > 0:
+            net = round(gross * 0.97)
 
         return {
             "boxes_count": boxes,
@@ -511,6 +402,7 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
     except Exception as e:
         return {"error": str(e)}
 
+
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.photo:
         return
@@ -518,16 +410,15 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     caption = (update.message.caption or "").strip()
     caption_nums = extract_numbers(caption)
 
+    currency = detect_currency(caption)
     boxes = 0.0
     invoice_net = 0.0
-    currency = detect_currency(caption)
 
-    # 1. إذا كُتبت الأرقام في وصف الصورة
     if len(caption_nums) >= 2:
         boxes = caption_nums[0]
         invoice_net = caption_nums[1]
     else:
-        status_msg = await update.message.reply_text("⏳")
+        status_msg = await update.message.reply_text("⏳ جاري قراءة الفاتورة...")
         try:
             photo_file = await update.message.photo[-1].get_file()
             photo_bytes = await photo_file.download_as_bytearray()
@@ -542,18 +433,15 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         boxes = float(data.get("boxes_count", 0))
         invoice_net = float(data.get("invoice_net_amount", 0))
-        raw_debug = data.get("raw_debug", "")
 
         if boxes <= 0 or invoice_net <= 0:
-            err_msg = (
-                f"⚠️ لم أتمكن من استخراج الأرقام بدقة.\n"
-                f"رد النموذج:\n`{raw_debug[:200]}`\n\n"
-                f"اكتب مع الصورة: عدد الصناديق والمبلغ (مثال: `9 118825`)"
+            await status_msg.edit_text(
+                "⚠️ لم يتم تحديد الأرقام بدقة.\n"
+                "أعد إرسالها مع كتابة: عدد الصناديق والمبلغ (مثال: `9 118825`)",
+                parse_mode="Markdown"
             )
-            await status_msg.edit_text(err_msg, parse_mode="Markdown")
             return
 
-    # احتساب المصروفات: 500 تكييس + 500 نقل لكل صندوق
     packing_cost = boxes * 500.0
     transport_cost = boxes * 500.0
     total_deductions = packing_cost + transport_cost
@@ -561,14 +449,12 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_name = update.effective_user.first_name or "مستخدم"
 
-    # قيد العمليات الثلاث في الشيت
     rev_res = add_transaction("إيراد", "مبيعات خيار", f"فاتورة {boxes:.0f} صندوق", invoice_net, currency, "بيع", "", user_name)
     add_transaction("مصروف", "تغليف وكراتين", f"تكييس {boxes:.0f} صندوق", -packing_cost, currency, "صرف", "", user_name)
     add_transaction("مصروف", "نقل وتسويق", f"نقل {boxes:.0f} صندوق", -transport_cost, currency, "صرف", "", user_name)
 
     final_balance = rev_res['balance'] - total_deductions
 
-    # الرد بأرقام فقط وبشكل مختصر
     summary = (
         f"📦 الصناديق: {boxes:,.0f}\n"
         f"💵 صافي الفاتورة: {invoice_net:,.0f}\n"
@@ -587,8 +473,159 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================================================
-# توليد تقرير PDF
+# دوال التقارير وتصدير الـ PDF
 # =========================================================
+
+def get_today_report():
+    records = sheet.get_all_values()
+    today = get_today_string()
+    production = 0.0
+    sar_income = 0.0
+    sar_expense = 0.0
+    yer_income = 0.0
+    yer_expense = 0.0
+    transactions_count = 0
+
+    for row in records[1:]:
+        if len(row) < 6 or not row[0].startswith(today):
+            continue
+
+        transactions_count += 1
+        transaction_type = row[1]
+        try:
+            amount = float(row[4].replace(",", ""))
+        except Exception:
+            continue
+        currency = row[5]
+
+        if transaction_type == "إنتاج":
+            production += abs(amount)
+        elif currency == "ريال سعودي":
+            if transaction_type == "إيراد":
+                sar_income += abs(amount)
+            elif transaction_type == "مصروف":
+                sar_expense += abs(amount)
+        elif currency == "ريال يمني":
+            if transaction_type == "إيراد":
+                yer_income += abs(amount)
+            elif transaction_type == "مصروف":
+                yer_expense += abs(amount)
+
+    return {
+        "production": production,
+        "sar_income": sar_income,
+        "sar_expense": sar_expense,
+        "yer_income": yer_income,
+        "yer_expense": yer_expense,
+        "count": transactions_count
+    }
+
+def get_month_report():
+    records = sheet.get_all_values()
+    current_month = get_now().strftime("%Y-%m")
+    production = 0.0
+    sar_income = 0.0
+    sar_expense = 0.0
+    yer_income = 0.0
+    yer_expense = 0.0
+    count = 0
+
+    for row in records[1:]:
+        if len(row) < 6 or not row[0].startswith(current_month):
+            continue
+
+        count += 1
+        transaction_type = row[1]
+        try:
+            amount = float(row[4].replace(",", ""))
+        except Exception:
+            continue
+        currency = row[5]
+
+        if transaction_type == "إنتاج":
+            production += abs(amount)
+        elif currency == "ريال سعودي":
+            if transaction_type == "إيراد":
+                sar_income += abs(amount)
+            elif transaction_type == "مصروف":
+                sar_expense += abs(amount)
+        elif currency == "ريال يمني":
+            if transaction_type == "إيراد":
+                yer_income += abs(amount)
+            elif transaction_type == "مصروف":
+                yer_expense += abs(amount)
+
+    return {
+        "production": production,
+        "sar_income": sar_income,
+        "sar_expense": sar_expense,
+        "yer_income": yer_income,
+        "yer_expense": yer_expense,
+        "count": count
+    }
+
+def get_profit_report():
+    records = sheet.get_all_values()
+    sar_income = 0.0
+    sar_expense = 0.0
+    yer_income = 0.0
+    yer_expense = 0.0
+    total_production = 0.0
+
+    for row in records[1:]:
+        if len(row) < 6:
+            continue
+
+        transaction_type = row[1]
+        try:
+            amount = float(row[4].replace(",", ""))
+        except Exception:
+            continue
+        currency = row[5]
+
+        if transaction_type == "إنتاج":
+            total_production += abs(amount)
+        elif transaction_type == "إيراد":
+            if currency == "ريال سعودي":
+                sar_income += abs(amount)
+            elif currency == "ريال يمني":
+                yer_income += abs(amount)
+        elif transaction_type == "مصروف":
+            if currency == "ريال سعودي":
+                sar_expense += abs(amount)
+            elif currency == "ريال يمني":
+                yer_expense += abs(amount)
+
+    return {
+        "production": total_production,
+        "sar_income": sar_income,
+        "sar_expense": sar_expense,
+        "sar_profit": sar_income - sar_expense,
+        "yer_income": yer_income,
+        "yer_expense": yer_expense,
+        "yer_profit": yer_income - yer_expense
+    }
+
+def get_debts():
+    records = sheet.get_all_values()
+    sar_debt = 0.0
+    yer_debt = 0.0
+
+    for row in records[1:]:
+        if len(row) < 6 or row[1] != "آجل / دين":
+            continue
+
+        try:
+            amount = abs(float(row[4].replace(",", "")))
+        except Exception:
+            continue
+
+        if row[5] == "ريال سعودي":
+            sar_debt += amount
+        elif row[5] == "ريال يمني":
+            yer_debt += amount
+
+    return sar_debt, yer_debt
 
 def generate_pdf_report():
     buffer = io.BytesIO()
@@ -699,234 +736,6 @@ def generate_pdf_report():
 
 
 # =========================================================
-# التقارير المالية
-# =========================================================
-
-def get_today_report():
-    records = sheet.get_all_values()
-    today = get_today_string()
-    production = 0.0
-    sar_income = 0.0
-    sar_expense = 0.0
-    yer_income = 0.0
-    yer_expense = 0.0
-    transactions_count = 0
-
-    for row in records[1:]:
-        if len(row) < 6 or not row[0].startswith(today):
-            continue
-
-        transactions_count += 1
-        transaction_type = row[1]
-        try:
-            amount = float(row[4].replace(",", ""))
-        except Exception:
-            continue
-        currency = row[5]
-
-        if transaction_type == "إنتاج":
-            production += abs(amount)
-        elif currency == "ريال سعودي":
-            if transaction_type == "إيراد":
-                sar_income += abs(amount)
-            elif transaction_type == "مصروف":
-                sar_expense += abs(amount)
-        elif currency == "ريال يمني":
-            if transaction_type == "إيراد":
-                yer_income += abs(amount)
-            elif transaction_type == "مصروف":
-                yer_expense += abs(amount)
-
-    return {
-        "production": production,
-        "sar_income": sar_income,
-        "sar_expense": sar_expense,
-        "yer_income": yer_income,
-        "yer_expense": yer_expense,
-        "count": transactions_count
-    }
-
-
-def get_month_report():
-    records = sheet.get_all_values()
-    current_month = get_now().strftime("%Y-%m")
-    production = 0.0
-    sar_income = 0.0
-    sar_expense = 0.0
-    yer_income = 0.0
-    yer_expense = 0.0
-    count = 0
-
-    for row in records[1:]:
-        if len(row) < 6 or not row[0].startswith(current_month):
-            continue
-
-        count += 1
-        transaction_type = row[1]
-        try:
-            amount = float(row[4].replace(",", ""))
-        except Exception:
-            continue
-        currency = row[5]
-
-        if transaction_type == "إنتاج":
-            production += abs(amount)
-        elif currency == "ريال سعودي":
-            if transaction_type == "إيراد":
-                sar_income += abs(amount)
-            elif transaction_type == "مصروف":
-                sar_expense += abs(amount)
-        elif currency == "ريال يمني":
-            if transaction_type == "إيراد":
-                yer_income += abs(amount)
-            elif transaction_type == "مصروف":
-                yer_expense += abs(amount)
-
-    return {
-        "production": production,
-        "sar_income": sar_income,
-        "sar_expense": sar_expense,
-        "yer_income": yer_income,
-        "yer_expense": yer_expense,
-        "count": count
-    }
-
-
-def get_profit_report():
-    records = sheet.get_all_values()
-    sar_income = 0.0
-    sar_expense = 0.0
-    yer_income = 0.0
-    yer_expense = 0.0
-    total_production = 0.0
-
-    for row in records[1:]:
-        if len(row) < 6:
-            continue
-
-        transaction_type = row[1]
-        try:
-            amount = float(row[4].replace(",", ""))
-        except Exception:
-            continue
-        currency = row[5]
-
-        if transaction_type == "إنتاج":
-            total_production += abs(amount)
-        elif transaction_type == "إيراد":
-            if currency == "ريال سعودي":
-                sar_income += abs(amount)
-            elif currency == "ريال يمني":
-                yer_income += abs(amount)
-        elif transaction_type == "مصروف":
-            if currency == "ريال سعودي":
-                sar_expense += abs(amount)
-            elif currency == "ريال يمني":
-                yer_expense += abs(amount)
-
-    return {
-        "production": total_production,
-        "sar_income": sar_income,
-        "sar_expense": sar_expense,
-        "sar_profit": sar_income - sar_expense,
-        "yer_income": yer_income,
-        "yer_expense": yer_expense,
-        "yer_profit": yer_income - yer_expense
-    }
-
-
-def get_debts():
-    records = sheet.get_all_values()
-    sar_debt = 0.0
-    yer_debt = 0.0
-
-    for row in records[1:]:
-        if len(row) < 6 or row[1] != "آجل / دين":
-            continue
-
-        try:
-            amount = abs(float(row[4].replace(",", "")))
-        except Exception:
-            continue
-
-        if row[5] == "ريال سعودي":
-            sar_debt += amount
-        elif row[5] == "ريال يمني":
-            yer_debt += amount
-
-    return sar_debt, yer_debt
-
-
-# =========================================================
-# القائمة الرئيسية
-# =========================================================
-
-def get_main_keyboard():
-    keyboard = [
-        [
-            InlineKeyboardButton("🥒 تسجيل بيع الخيار", callback_data="help_sale"),
-            InlineKeyboardButton("⚖️ تسجيل الإنتاج", callback_data="help_production")
-        ],
-        [
-            InlineKeyboardButton("💸 تسجيل مصروف", callback_data="help_expense"),
-            InlineKeyboardButton("👷 أجور العمال", callback_data="help_workers")
-        ],
-        [
-            InlineKeyboardButton("🧪 أسمدة ومبيدات", callback_data="help_fertilizer"),
-            InlineKeyboardButton("💧 مياه وري", callback_data="help_water")
-        ],
-        [
-            InlineKeyboardButton("⛽ وقود وطاقة", callback_data="help_fuel"),
-            InlineKeyboardButton("📦 تغليف وكراتين", callback_data="help_packaging")
-        ],
-        [
-            InlineKeyboardButton("💱 صرافة", callback_data="help_exchange"),
-            InlineKeyboardButton("🏦 رصيد الكاش", callback_data="cmd_balance")
-        ],
-        [
-            InlineKeyboardButton("📊 تقرير اليوم", callback_data="cmd_today"),
-            InlineKeyboardButton("📅 التقرير الشهري", callback_data="cmd_month")
-        ],
-        [
-            InlineKeyboardButton("📈 الأرباح والصافي", callback_data="cmd_profits"),
-            InlineKeyboardButton("📑 الديون والآجل", callback_data="cmd_debts")
-        ],
-        [
-            InlineKeyboardButton("📄 تصدير تقرير PDF", callback_data="cmd_pdf"),
-            InlineKeyboardButton("🔗 فتح شيت قوقل", url=SPREADSHEET_URL)
-        ],
-        [
-            InlineKeyboardButton("🔄 حذف آخر عملية", callback_data="cmd_undo")
-        ]
-    ]
-    return InlineKeyboardMarkup(keyboard)
-
-
-# =========================================================
-# أمر /start
-# =========================================================
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_name = update.effective_user.first_name or "أخي الكريم"
-    message = (
-        f"🌱 *أهلاً بك {user_name} في نظام إدارة مشروع المحمية* 🥒\n\n"
-        "أرسل صورة الفاتورة مباشرة، أو أرسل العمليات نصياً.\n\n"
-        "*أمثلة سريعة:*\n"
-        "📸 _أرسل صورة الفاتورة مباشرة_\n"
-        "🥒 `بيع خيار 500 كيلو بسعر 120 سعودي`\n"
-        "⚖️ `إنتاج اليوم 750 كيلو`\n"
-        "🧪 `سماد 25000 يمني`\n"
-        "👷 `أجرة عمال 150 سعودي`\n"
-        "💱 `صرف 100 سعودي بسعر 535`"
-    )
-    await update.message.reply_text(
-        message,
-        reply_markup=get_main_keyboard(),
-        parse_mode="Markdown"
-    )
-
-
-# =========================================================
 # معالجة الصرافة
 # =========================================================
 
@@ -981,8 +790,103 @@ async def handle_exchange(update: Update, context: ContextTypes.DEFAULT_TYPE, te
 
 
 # =========================================================
-# استقبال ومعالجة الرسائل النصية
+# الرسائل والأزرار والقوائم
 # =========================================================
+
+def get_main_keyboard():
+    keyboard = [
+        [
+            InlineKeyboardButton("🏦 رصيد الكاش", callback_data="cmd_balance"),
+            InlineKeyboardButton("📊 تقرير اليوم", callback_data="cmd_today")
+        ],
+        [
+            InlineKeyboardButton("📅 التقرير الشهري", callback_data="cmd_month"),
+            InlineKeyboardButton("📈 الأرباح الكاملة", callback_data="cmd_profits")
+        ],
+        [
+            InlineKeyboardButton("📑 الديون والآجل", callback_data="cmd_debts"),
+            InlineKeyboardButton("📄 تصدير PDF", callback_data="cmd_pdf")
+        ],
+        [
+            InlineKeyboardButton("🔗 فتح شيت قوقل", url=SPREADSHEET_URL),
+            InlineKeyboardButton("🔄 تراجع (حذف الأخيرة)", callback_data="cmd_undo")
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_name = update.effective_user.first_name or "أخي الكريم"
+    await update.message.reply_text(
+        f"🌱 *أهلاً بك {user_name} في نظام إدارة المحمية*\n\n"
+        "أرسل صورة الفاتورة مباشرة لقيدها تلقائياً، أو استخدم الأزرار أدناه:",
+        reply_markup=get_main_keyboard(),
+        parse_mode="Markdown"
+    )
+
+async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    action = query.data
+
+    if action == "cmd_balance":
+        balances = calculate_balances()
+        await query.message.reply_text(
+            f"🇸🇦 سعودي: {balances['ريال سعودي']:,.0f} ر.س\n"
+            f"🇾🇪 يمني: {balances['ريال يمني']:,.0f} ر.ي"
+        )
+    elif action == "cmd_today":
+        report = get_today_report()
+        await query.message.reply_text(
+            f"📊 اليوم: {get_today_string()}\n"
+            f"⚖️ إنتاج: {report['production']:,.0f} كجم\n\n"
+            f"🇸🇦 صافي سعودي: {(report['sar_income'] - report['sar_expense']):,.0f}\n"
+            f"🇾🇪 صافي يمني: {(report['yer_income'] - report['yer_expense']):,.0f}"
+        )
+    elif action == "cmd_month":
+        report = get_month_report()
+        month = get_now().strftime("%Y-%m")
+        await query.message.reply_text(
+            f"📅 شهر: {month}\n"
+            f"⚖️ إنتاج: {report['production']:,.0f} كجم\n\n"
+            f"🇸🇦 صافي سعودي: {(report['sar_income'] - report['sar_expense']):,.0f}\n"
+            f"🇾🇪 صافي يمني: {(report['yer_income'] - report['yer_expense']):,.0f}"
+        )
+    elif action == "cmd_profits":
+        report = get_profit_report()
+        await query.message.reply_text(
+            f"📈 الأرباح الكاملة للمشروع:\n"
+            f"⚖️ إجمالي الإنتاج: {report['production']:,.0f} كجم\n"
+            f"🇸🇦 صافي سعودي: {report['sar_profit']:,.0f}\n"
+            f"🇾🇪 صافي يمني: {report['yer_profit']:,.0f}"
+        )
+    elif action == "cmd_debts":
+        sar_debt, yer_debt = get_debts()
+        await query.message.reply_text(
+            f"📑 الديون المسجلة:\n🇸🇦 سعودي: {sar_debt:,.0f}\n🇾🇪 يمني: {yer_debt:,.0f}"
+        )
+    elif action == "cmd_pdf":
+        await query.message.reply_text("⏳ جاري إنشاء تقرير PDF...")
+        try:
+            pdf_file = generate_pdf_report()
+            today_str = get_today_string()
+            await query.message.reply_document(
+                document=pdf_file,
+                filename=f"Report_{today_str}.pdf",
+                caption=f"📄 تقرير {today_str}"
+            )
+        except Exception as e:
+            await query.message.reply_text(f"❌ {e}")
+    elif action == "cmd_undo":
+        records = sheet.get_all_values()
+        if len(records) <= 1:
+            await query.message.reply_text("⚠️ لا توجد عمليات لحذفها")
+            return
+        last_row = records[-1]
+        sheet.delete_rows(len(records))
+        user_name = update.effective_user.first_name or "مستخدم"
+        reply = f"🔄 تم حذف آخر عملية:\n{last_row[1]} | {last_row[4]} {last_row[5]}"
+        await query.message.reply_text(reply)
+        await notify_admins(context, reply, update.effective_chat.id)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
@@ -996,7 +900,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if await handle_exchange(update, context, raw_text):
             return
 
-    # معالجة نص الفاتورة المباشر مثل: فاتورة 9 118825
     if raw_text.startswith("فاتورة") or raw_text.startswith("فاتوره"):
         nums = extract_numbers(raw_text)
         if len(nums) >= 2:
@@ -1027,16 +930,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     transaction = analyze_message(raw_text)
-
     if transaction["amount"] == 0 and transaction["type"] != "إنتاج":
-        await update.message.reply_text(
-            "⚠️ لم يتم التعرف على المبلغ، مثال:\n`سماد 25000 يمني`",
-            parse_mode="Markdown"
-        )
         return
 
     user_name = update.effective_user.first_name or "مستخدم"
-
     result = add_transaction(
         transaction_type=transaction["type"],
         category=transaction["category"],
@@ -1048,172 +945,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_name=user_name
     )
 
-    if transaction["type"] == "إنتاج":
-        reply = (
-            f"⚖️ الإنتاج: {transaction['amount']:,.0f} كيلو\n"
-            f"📂 الفئة: {transaction['category']}\n"
-            f"👤 بواسطة: {user_name}"
-        )
-    else:
-        reply = (
-            f"🏷️ النوع: {transaction['type']}\n"
-            f"💰 المبلغ: {abs(transaction['amount']):,.0f} {transaction['currency']}\n"
-            f"🏦 الرصيد: {result['balance']:,.0f} {transaction['currency']}\n"
-            f"👤 بواسطة: {user_name}"
-        )
-
+    reply = (
+        f"🏷️ النوع: {transaction['type']}\n"
+        f"💰 المبلغ: {abs(transaction['amount']):,.0f} {transaction['currency']}\n"
+        f"🏦 الرصيد: {result['balance']:,.0f} {transaction['currency']}"
+    )
     await update.message.reply_text(reply)
-    await notify_admins(context, reply, update.effective_chat.id)
 
 
 # =========================================================
-# معالجة الأزرار
-# =========================================================
-
-async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    action = query.data
-
-    if action == "help_sale":
-        await query.message.reply_text("أرسل صورة الفاتورة مباشرة، أو اكتب:\n`فاتورة 9 118825`", parse_mode="Markdown")
-        return
-    if action == "help_production":
-        await query.message.reply_text("أرسل الكمية:\n`إنتاج اليوم 750 كيلو`", parse_mode="Markdown")
-        return
-    if action == "help_expense":
-        await query.message.reply_text("أرسل المبلغ:\n`مصروف 25000 يمني`", parse_mode="Markdown")
-        return
-    if action == "help_workers":
-        await query.message.reply_text("أرسل الأجرة:\n`أجرة عمال 150 سعودي`", parse_mode="Markdown")
-        return
-    if action == "help_fertilizer":
-        await query.message.reply_text("أرسل القيمة:\n`سماد 25000 يمني`", parse_mode="Markdown")
-        return
-    if action == "help_water":
-        await query.message.reply_text("أرسل القيمة:\n`ماء 15000 يمني`", parse_mode="Markdown")
-        return
-    if action == "help_fuel":
-        await query.message.reply_text("أرسل القيمة:\n`ديزل 50000 يمني`", parse_mode="Markdown")
-        return
-    if action == "help_packaging":
-        await query.message.reply_text("أرسل القيمة:\n`كراتين 30000 يمني`", parse_mode="Markdown")
-        return
-    if action == "help_exchange":
-        await query.message.reply_text("أرسل التفاصيل:\n`صرف 200 سعودي بسعر 535`", parse_mode="Markdown")
-        return
-
-    if action == "cmd_balance":
-        balances = calculate_balances()
-        await query.message.reply_text(
-            f"🇸🇦 سعودي: {balances['ريال سعودي']:,.0f} ر.س\n"
-            f"🇾🇪 يمني: {balances['ريال يمني']:,.0f} ر.ي"
-        )
-        return
-
-    if action == "cmd_today":
-        report = get_today_report()
-        await query.message.reply_text(
-            f"📊 اليوم: {get_today_string()}\n"
-            f"⚖️ إنتاج: {report['production']:,.0f} كجم\n\n"
-            f"🇸🇦 سعودي:\n"
-            f"🟢 إيراد: {report['sar_income']:,.0f}\n"
-            f"🔴 صرف: {report['sar_expense']:,.0f}\n"
-            f"📈 صافي: {(report['sar_income'] - report['sar_expense']):,.0f}\n\n"
-            f"🇾🇪 يمني:\n"
-            f"🟢 إيراد: {report['yer_income']:,.0f}\n"
-            f"🔴 صرف: {report['yer_expense']:,.0f}\n"
-            f"📈 صافي: {(report['yer_income'] - report['yer_expense']):,.0f}"
-        )
-        return
-
-    if action == "cmd_month":
-        report = get_month_report()
-        month = get_now().strftime("%Y-%m")
-        await query.message.reply_text(
-            f"📅 شهر: {month}\n"
-            f"⚖️ إجمالي إنتاج: {report['production']:,.0f} كجم\n\n"
-            f"🇸🇦 صافي سعودي: {(report['sar_income'] - report['sar_expense']):,.0f}\n"
-            f"🇾🇪 صافي يمني: {(report['yer_income'] - report['yer_expense']):,.0f}"
-        )
-        return
-
-    if action == "cmd_profits":
-        report = get_profit_report()
-        await query.message.reply_text(
-            f"📈 الأرباح الكاملة:\n"
-            f"⚖️ الإنتاج: {report['production']:,.0f} كجم\n\n"
-            f"🇸🇦 صافي سعودي: {report['sar_profit']:,.0f}\n"
-            f"🇾🇪 صافي يمني: {report['yer_profit']:,.0f}"
-        )
-        return
-
-    if action == "cmd_debts":
-        sar_debt, yer_debt = get_debts()
-        await query.message.reply_text(
-            f"📑 الديون:\n🇸🇦 سعودي: {sar_debt:,.0f}\n🇾🇪 يمني: {yer_debt:,.0f}"
-        )
-        return
-
-    if action == "cmd_pdf":
-        await query.message.reply_text("⏳")
-        try:
-            pdf_file = generate_pdf_report()
-            today_str = get_today_string()
-            await query.message.reply_document(
-                document=pdf_file,
-                filename=f"Cucumber_Farm_{today_str}.pdf",
-                caption=f"📄 تقرير {today_str}"
-            )
-        except Exception as e:
-            await query.message.reply_text(f"❌ {e}")
-        return
-
-    if action == "cmd_undo":
-        records = sheet.get_all_values()
-        if len(records) <= 1:
-            await query.message.reply_text("⚠️ لا توجد عمليات لحذفها")
-            return
-
-        last_row = records[-1]
-        sheet.delete_rows(len(records))
-        user_name = update.effective_user.first_name or "مستخدم"
-        reply = f"🔄 تم حذف آخر عملية:\n{last_row[1]} | {last_row[4]} {last_row[5]}"
-        await query.message.reply_text(reply)
-        await notify_admins(context, reply, update.effective_chat.id)
-        return
-
-
-# =========================================================
-# معالجة الأخطاء
-# =========================================================
-
-async def error_handler(update, context):
-    print("Error:", context.error)
-
-
-# =========================================================
-# تشغيل البوت
+# تشغيل التطبيق
 # =========================================================
 
 if __name__ == "__main__":
     web_thread = threading.Thread(target=run_web_server, daemon=True)
     web_thread.start()
 
-    app = (
-        ApplicationBuilder()
-        .token(BOT_TOKEN)
-        .build()
-    )
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_buttons))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_error_handler(error_handler)
 
-    print("=" * 50)
-    print("🤖 بوت إدارة مشروع المحمية جاهز ويعمل الآن")
-    print("=" * 50)
-
+    print("Cucumber Bot is running 24/7...")
     app.run_polling(drop_pending_updates=True)
