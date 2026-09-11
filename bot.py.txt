@@ -4,12 +4,9 @@ import datetime
 import re
 import uuid
 import json
-import base64
 import threading
 import urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
-
-import requests
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -17,14 +14,13 @@ from telegram.ext import (
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
+    ConversationHandler,
     ContextTypes,
     filters
 )
 
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-
-from PIL import Image, ImageOps
 
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
@@ -37,12 +33,10 @@ from bidi.algorithm import get_display
 
 
 # =========================================================
-# الإعدادات والمفاتيح
+# الإعدادات
 # =========================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8943498488:AAFbsQw7oPJqqADrxYdo3k7eC1lZe5jgqm4")
-GEMINI_AUTH_KEY = os.getenv("GEMINI_AUTH_KEY", "AQ.Ab8RN6KSSTX5Dw4xwdnBc_txO6RLv1w4Cb5CJabmg93JxUg_dw")
-
 ADMIN_IDS = [8646384325, 6017996704]
 
 SPREADSHEET_URL = (
@@ -53,9 +47,12 @@ SPREADSHEET_URL = (
 CREDENTIALS_FILE = "credentials.json"
 SHEET_NAME = "Sheet1"
 
+# حالات المحادثة التفاعلية للفاتورة
+WAIT_BOXES, WAIT_NET, WAIT_PHOTO = range(3)
+
 
 # =========================================================
-# تنزيل وتهيئة الخط العربي للـ PDF
+# تهيئة الخط العربي للـ PDF
 # =========================================================
 
 ARABIC_FONT_PATH = "Amiri-Regular.ttf"
@@ -352,133 +349,14 @@ async def notify_admins(context: ContextTypes.DEFAULT_TYPE, message_text: str, s
 
 
 # =========================================================
-# معالجة الفاتورة عبر Gemini API الرسمي
+# معالجة الفواتير (تفاعلي خطوة بخطوة + بالوصف)
 # =========================================================
 
-def parse_invoice_image(image_bytes: bytes) -> dict:
-    auth_key = "AQ.Ab8RN6KSSTX5Dw4xwdnBc_txO6RLv1w4Cb5CJabmg93JxUg_dw"
-
-    try:
-        img = Image.open(io.BytesIO(image_bytes))
-        img = ImageOps.exif_transpose(img)
-
-        # تعديل اتجاه الصورة إذا كانت مائلة
-        if img.width > img.height:
-            img = img.rotate(-90, expand=True)
-
-        img.thumbnail((1600, 1600))
-        buffered = io.BytesIO()
-        img.save(buffered, format="JPEG", quality=90)
-        img_b64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
-
-        prompt = (
-            "أنت مدقق محاسبي لفواتير سوق الخضار والفواكه المركزي.\n"
-            "استخرج البيانات التالية بدقة كأرقام صحيحة فقط:\n"
-            "1. boxes: مجموع عمود الكمية (عدد الصناديق/السلات).\n"
-            "2. gross: الإجمالي العام قبل الخصم.\n"
-            "3. net: الرصيد المتبقي الصافي (المطابق للتفقيط المكتوب بالكلمات أسفل الفاتورة).\n\n"
-            "إذا تعذر قراءة الصافي: net = gross * 0.97.\n"
-            "أخرج الناتج كـ JSON فقط بالصيغة:\n"
-            '{"boxes": <number>, "gross": <number>, "net": <number>}'
-        )
-
-        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
-
-        # هذا هو الهيدر الرسمي الوحيد المقبول لمفاتيح AQ المربوطة بحساب خدمة
-        headers = {
-            "Content-Type": "application/json",
-            "x-goog-api-key": auth_key
-        }
-
-        payload = {
-            "contents": [
-                {
-                    "parts": [
-                        {"text": prompt},
-                        {
-                            "inline_data": {
-                                "mime_type": "image/jpeg",
-                                "data": img_b64
-                            }
-                        }
-                    ]
-                }
-            ],
-            "generationConfig": {
-                "temperature": 0.0,
-                "response_mime_type": "application/json"
-            }
-        }
-
-        res = requests.post(url, headers=headers, json=payload, timeout=35)
-
-        if res.status_code != 200:
-            return {"error": f"Google Error ({res.status_code}): {res.text}"}
-
-        resp_json = res.json()
-        raw_text = resp_json['candidates'][0]['content']['parts'][0]['text'].strip()
-        data = json.loads(raw_text)
-
-        boxes = float(data.get("boxes", 0))
-        gross = float(data.get("gross", 0))
-        net = float(data.get("net", 0))
-
-        if net == 0 and gross > 0:
-            net = round(gross * 0.97)
-
-        return {
-            "boxes_count": boxes,
-            "invoice_net_amount": net,
-            "currency": "ريال يمني"
-        }
-
-    except Exception as e:
-        return {"error": str(e)}
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.photo:
-        return
-
-    caption = (update.message.caption or "").strip()
-    caption_nums = extract_numbers(caption)
-
-    currency = detect_currency(caption)
-    boxes = 0.0
-    invoice_net = 0.0
-
-    if len(caption_nums) >= 2:
-        boxes = caption_nums[0]
-        invoice_net = caption_nums[1]
-    else:
-        status_msg = await update.message.reply_text("⏳ جاري تدقيق الفاتورة عبر Gemini...")
-        try:
-            photo_file = await update.message.photo[-1].get_file()
-            photo_bytes = await photo_file.download_as_bytearray()
-            data = parse_invoice_image(bytes(photo_bytes))
-        except Exception as e:
-            await status_msg.edit_text(f"❌ {e}")
-            return
-
-        if "error" in data:
-            await status_msg.edit_text(f"❌ {data['error']}")
-            return
-
-        boxes = float(data.get("boxes_count", 0))
-        invoice_net = float(data.get("invoice_net_amount", 0))
-
-        if boxes <= 0 or invoice_net <= 0:
-            await status_msg.edit_text(
-                "⚠️ لم يتم تحديد الأرقام بدقة.\n"
-                "أعد إرسالها مع كتابة: عدد الصناديق والمبلغ (مثال: `9 118825`)",
-                parse_mode="Markdown"
-            )
-            return
-
+def process_invoice_entry(boxes: float, invoice_net: float, currency: str, user_name: str) -> str:
     packing_cost = boxes * 500.0
     transport_cost = boxes * 500.0
     total_deductions = packing_cost + transport_cost
     final_net = invoice_net - total_deductions
-
-    user_name = update.effective_user.first_name or "مستخدم"
 
     rev_res = add_transaction("إيراد", "مبيعات خيار", f"فاتورة {boxes:.0f} صندوق", invoice_net, currency, "بيع", "", user_name)
     add_transaction("مصروف", "تغليف وكراتين", f"تكييس {boxes:.0f} صندوق", -packing_cost, currency, "صرف", "", user_name)
@@ -487,20 +365,104 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     final_balance = rev_res['balance'] - total_deductions
 
     summary = (
-        f"📦 الصناديق: {boxes:,.0f}\n"
-        f"💵 صافي الفاتورة: {invoice_net:,.0f}\n"
-        f"✂️ التكييس: {packing_cost:,.0f}\n"
-        f"🚚 النقل: {transport_cost:,.0f}\n"
-        f"💰 الصافي النهائي: {final_net:,.0f}\n"
-        f"🏦 الرصيد: {final_balance:,.0f} {currency}"
+        f"✅ *تم قيد الفاتورة بنجاح*\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"📦 عدد الصناديق: *{boxes:,.0f}*\n"
+        f"💵 صافي الفاتورة: *{invoice_net:,.0f}* {currency}\n"
+        f"✂️ تكلفة التكييس: *{packing_cost:,.0f}* {currency}\n"
+        f"🚚 تكلفة النقل: *{transport_cost:,.0f}* {currency}\n"
+        f"💰 الصافي النهائي للمزرعة: *{final_net:,.0f}* {currency}\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"🏦 رصيد الكاش الحالي: *{final_balance:,.0f}* {currency}"
     )
+    return summary
 
-    if 'status_msg' in locals():
-        await status_msg.edit_text(summary)
+# بدء المحادثة التفاعلية
+async def invoice_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.callback_query:
+        await update.callback_query.answer()
+        msg = update.callback_query.message
     else:
-        await update.message.reply_text(summary)
+        msg = update.message
 
+    await msg.reply_text(
+        "📥 *إضافة فاتورة مبيعات جديدة*\n\n"
+        "أدخل الآن *عدد الصناديق*:\n"
+        "*(أو أرسل /cancel للإلغاء)*",
+        parse_mode="Markdown"
+    )
+    return WAIT_BOXES
+
+async def invoice_get_boxes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    nums = extract_numbers(update.message.text)
+    if not nums or nums[0] <= 0:
+        await update.message.reply_text("⚠️ يرجى إدخال رقم صحيح لعدد الصناديق:")
+        return WAIT_BOXES
+
+    context.user_data["invoice_boxes"] = nums[0]
+    await update.message.reply_text(
+        f"📦 تم تحديد: *{nums[0]:,.0f} صندوق*\n\n"
+        "أدخل الآن *صافي الفاتورة* (المبلغ بالريال اليمني):",
+        parse_mode="Markdown"
+    )
+    return WAIT_NET
+
+async def invoice_get_net(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    nums = extract_numbers(update.message.text)
+    if not nums or nums[0] <= 0:
+        await update.message.reply_text("⚠️ يرجى إدخال مبلغ صحيح:")
+        return WAIT_NET
+
+    context.user_data["invoice_net"] = nums[0]
+    await update.message.reply_text(
+        f"💵 تم تحديد صافي الفاتورة: *{nums[0]:,.0f} ريال*\n\n"
+        "الآن *أرسل صورة الفاتورة* لتوثيقها في الشات:\n"
+        "*(أو أرسل /skip لتسجيلها بدون صورة)*",
+        parse_mode="Markdown"
+    )
+    return WAIT_PHOTO
+
+async def invoice_finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    boxes = context.user_data.get("invoice_boxes", 0.0)
+    net_amt = context.user_data.get("invoice_net", 0.0)
+    user_name = update.effective_user.first_name or "مستخدم"
+
+    summary = process_invoice_entry(boxes, net_amt, "ريال يمني", user_name)
+
+    await update.message.reply_text(summary, parse_mode="Markdown")
     await notify_admins(context, summary, update.effective_chat.id)
+
+    context.user_data.clear()
+    return ConversationHandler.END
+
+async def invoice_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    await update.message.reply_text("❌ تم إلغاء تسجيل الفاتورة.")
+    return ConversationHandler.END
+
+# إمكانية إرسال الصورة مع الكابشن مباشرة دون الدخول في المحادثة
+async def handle_direct_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.photo:
+        return
+
+    caption = (update.message.caption or "").strip()
+    caption_nums = extract_numbers(caption)
+
+    if len(caption_nums) >= 2:
+        boxes = caption_nums[0]
+        invoice_net = caption_nums[1]
+        currency = detect_currency(caption)
+        user_name = update.effective_user.first_name or "مستخدم"
+
+        summary = process_invoice_entry(boxes, invoice_net, currency, user_name)
+        await update.message.reply_text(summary, parse_mode="Markdown")
+        await notify_admins(context, summary, update.effective_chat.id)
+    else:
+        await update.message.reply_text(
+            "💡 *لتسجيل هذه الفاتورة بسهولة:*\n"
+            "اضغط على زر *«📥 إضافة فاتورة مبيعات»* من القائمة بالأسفل، أو أعد إرسال الصورة واكتب في وصفها: عدد الصناديق والمبلغ (مثال: `9 118825`).",
+            parse_mode="Markdown"
+        )
 
 
 # =========================================================
@@ -819,20 +781,23 @@ async def handle_exchange(update: Update, context: ContextTypes.DEFAULT_TYPE, te
 def get_main_keyboard():
     keyboard = [
         [
-            InlineKeyboardButton("🏦 رصيد الكاش", callback_data="cmd_balance"),
-            InlineKeyboardButton("📊 تقرير اليوم", callback_data="cmd_today")
+            InlineKeyboardButton("📥 إضافة فاتورة مبيعات", callback_data="cmd_invoice_start"),
+            InlineKeyboardButton("🏦 رصيد الكاش", callback_data="cmd_balance")
         ],
         [
-            InlineKeyboardButton("📅 التقرير الشهري", callback_data="cmd_month"),
-            InlineKeyboardButton("📈 الأرباح الكاملة", callback_data="cmd_profits")
+            InlineKeyboardButton("📊 تقرير اليوم", callback_data="cmd_today"),
+            InlineKeyboardButton("📅 التقرير الشهري", callback_data="cmd_month")
         ],
         [
-            InlineKeyboardButton("📑 الديون والآجل", callback_data="cmd_debts"),
-            InlineKeyboardButton("📄 تصدير PDF", callback_data="cmd_pdf")
+            InlineKeyboardButton("📈 الأرباح الكاملة", callback_data="cmd_profits"),
+            InlineKeyboardButton("📑 الديون والآجل", callback_data="cmd_debts")
         ],
         [
-            InlineKeyboardButton("🔗 فتح شيت قوقل", url=SPREADSHEET_URL),
+            InlineKeyboardButton("📄 تصدير PDF", callback_data="cmd_pdf"),
             InlineKeyboardButton("🔄 تراجع (حذف الأخيرة)", callback_data="cmd_undo")
+        ],
+        [
+            InlineKeyboardButton("🔗 فتح شيت قوقل", url=SPREADSHEET_URL)
         ]
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -841,7 +806,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.effective_user.first_name or "أخي الكريم"
     await update.message.reply_text(
         f"🌱 *أهلاً بك {user_name} في نظام إدارة المحمية*\n\n"
-        "أرسل صورة الفاتورة مباشرة لقيدها تلقائياً، أو استخدم الأزرار أدناه:",
+        "يمكنك الضغط على *«📥 إضافة فاتورة مبيعات»* لتسجيل الفاتورة وحساب التكييس والنقل والصافي تلقائياً، أو استخدم الأزرار أدناه:",
         reply_markup=get_main_keyboard(),
         parse_mode="Markdown"
     )
@@ -925,35 +890,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if await handle_exchange(update, context, raw_text):
             return
 
-    if raw_text.startswith("فاتورة") or raw_text.startswith("فاتوره"):
-        nums = extract_numbers(raw_text)
-        if len(nums) >= 2:
-            boxes = nums[0]
-            invoice_net = nums[1]
-            currency = detect_currency(raw_text)
-            packing_cost = boxes * 500.0
-            transport_cost = boxes * 500.0
-            total_deductions = packing_cost + transport_cost
-            final_net = invoice_net - total_deductions
-            user_name = update.effective_user.first_name or "مستخدم"
-
-            rev_res = add_transaction("إيراد", "مبيعات خيار", f"فاتورة {boxes:.0f} صندوق", invoice_net, currency, "بيع", "", user_name)
-            add_transaction("مصروف", "تغليف وكراتين", f"تكييس {boxes:.0f} صندوق", -packing_cost, currency, "صرف", "", user_name)
-            add_transaction("مصروف", "نقل وتسويق", f"نقل {boxes:.0f} صندوق", -transport_cost, currency, "صرف", "", user_name)
-            final_balance = rev_res['balance'] - total_deductions
-
-            summary = (
-                f"📦 الصناديق: {boxes:,.0f}\n"
-                f"💵 صافي الفاتورة: {invoice_net:,.0f}\n"
-                f"✂️ التكييس: {packing_cost:,.0f}\n"
-                f"🚚 النقل: {transport_cost:,.0f}\n"
-                f"💰 الصافي النهائي: {final_net:,.0f}\n"
-                f"🏦 الرصيد: {final_balance:,.0f} {currency}"
-            )
-            await update.message.reply_text(summary)
-            await notify_admins(context, summary, update.effective_chat.id)
-            return
-
     transaction = analyze_message(raw_text)
     if transaction["amount"] == 0 and transaction["type"] != "إنتاج":
         return
@@ -988,13 +924,32 @@ if __name__ == "__main__":
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
+    # محادثة إدخال الفاتورة التفاعلية
+    invoice_conv_handler = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(invoice_start, pattern="^cmd_invoice_start$"),
+            CommandHandler("invoice", invoice_start)
+        ],
+        states={
+            WAIT_BOXES: [MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_get_boxes)],
+            WAIT_NET: [MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_get_net)],
+            WAIT_PHOTO: [
+                MessageHandler(filters.PHOTO, invoice_finish),
+                CommandHandler("skip", invoice_finish)
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", invoice_cancel)],
+        per_message=False
+    )
+
+    app.add_handler(invoice_conv_handler)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_buttons))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_direct_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     print("=" * 50)
-    print("🤖 بوت إدارة مشروع المحمية جاهز ويعمل الآن")
+    print("🤖 بوت إدارة المحمية جاهز ويعمل الآن بنظام الإدخال التفاعلي")
     print("=" * 50)
 
     app.run_polling(drop_pending_updates=True)
