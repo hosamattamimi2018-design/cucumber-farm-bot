@@ -430,7 +430,7 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
         img = Image.open(io.BytesIO(image_bytes))
         img = ImageOps.exif_transpose(img)
 
-        # ضبط اتجاه الصورة تلقائياً إذا كانت عرضية لضمان قراءة الترويسة في الأعلى
+        # ضبط اتجاه الصورة تلقائياً إذا كانت عرضية
         if img.width > img.height:
             img = img.rotate(-90, expand=True)
 
@@ -476,7 +476,7 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
                     ],
                 }
             ],
-           model="llama-3.2-11b-vision-preview",
+            model="meta-llama/llama-4-scout-17b-vision",
             temperature=0.0,
             max_tokens=150
         )
