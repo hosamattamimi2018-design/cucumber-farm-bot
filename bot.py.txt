@@ -422,41 +422,17 @@ async def notify_admins(context: ContextTypes.DEFAULT_TYPE, message_text: str, s
 # معالجة وتدوير وتدقيق الفاتورة حسابياً بالذكاء الاصطناعي
 # =========================================================
 
-prompt = (
-    "أنت محاسب ومدقق فواتير محترف للسوق المركزي (THE CENTER MARKET) لبيع الخضار والفواكه بوادي حضرموت - سيئون.\n"
-    "اقرأ بيانات الفاتورة وطبق القواعد الرياضية الإلزامية:\n"
-    "1. عمود الكمية (عدد الصناديق): اجمع كامل عمود الكميات لكل سطر مبيعات.\n"
-    "2. خانة الإجمالي العام: مجموع مبالغ السطور.\n"
-    "3. عمولة السوق (الخصم 3%): الإجمالي × 0.03.\n"
-    "4. الرصيد المتبقي (الصافي): الإجمالي - الخصم.\n"
-    "5. طابق مع التفقيط المكتوب أسفل الفاتورة (مثال: مائة وثمانية عشر ألف وثمانمائة وخمسة وعشرون ريال).\n\n"
-    "أخرج الأرقام بالريال اليمني كأعداد صحيحة بدون علامات عشرية بالتنسيق التالي حصراً "
-    "بدون أي شرح أو تفكير إضافي:\n"
-    "BOXES: <مجموع الصناديق>\n"
-    "GROSS: <الإجمالي العام>\n"
-    "NET: <الرصيد المتبقي الصافي>"
-)
+=> Setting WEB_CONCURRENCY=1 by default, based on available CPUs in the instance
+==> Running 'python bot.py.txt'
+Traceback (most recent call last):
+  File "/opt/render/project/src/bot.py.txt", line 449, in <module>
+    "url": f"data:image/jpeg;base64,{base64_image}",
+                                     ^^^^^^^^^^^^
+NameError: name 'base64_image' is not defined
+==> Exited with status 1
+==> Common ways to troubleshoot your deploy: https://render.com/docs/troubleshooting-deploys
+==> Running 'python bot.py.txt'
 
-chat_completion = groq_client.chat.completions.create(
-    messages=[
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": prompt},
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/jpeg;base64,{base64_image}",
-                    },
-                },
-            ],
-        }
-    ],
-    model="qwen/qwen3.6-27b",
-    max_tokens=800,          # هامش أكبر احتياطاً
-    temperature=0.0,
-    reasoning_effort="none", # التعطيل الفعلي للتفكير عبر Groq API
-)
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
