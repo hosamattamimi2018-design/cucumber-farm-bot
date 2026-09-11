@@ -390,11 +390,11 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
             '{"boxes": <number>, "gross": <number>, "net": <number>}'
         )
 
-        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+        # تمرير المفتاح كـ query parameter في الرابط مباشرة لحل مشكلة التوثيق نهائياً
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
         
         headers = {
-            "Content-Type": "application/json",
-            "x-goog-api-key": GEMINI_API_KEY
+            "Content-Type": "application/json"
         }
 
         payload = {
