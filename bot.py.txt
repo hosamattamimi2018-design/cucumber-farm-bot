@@ -430,7 +430,7 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
         img = Image.open(io.BytesIO(image_bytes))
         img = ImageOps.exif_transpose(img)
 
-        # ضبط اتجاه الصورة تلقائياً إذا كانت عرضية
+        # ضبط اتجاه الصورة تلقائياً لتصبح ترويسة الفاتورة في الأعلى
         if img.width > img.height:
             img = img.rotate(-90, expand=True)
 
@@ -445,24 +445,17 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
         base64_image = base64.b64encode(buffered.getvalue()).decode('utf-8')
 
         prompt = (
-            "You are an automated accounting parser for vegetable market invoices.\n"
-            "Analyze the image and extract general invoice data:\n"
-            "1. 'boxes': Sum of all numbers in the quantity column ('الكمية').\n"
-            "2. 'gross': The total amount before discount ('الإجمالي').\n"
-            "3. 'net': The final net balance ('الرصيد المتبقي').\n\n"
-            "Rules:\n"
-            "- If 'net' is unclear, calculate it: net = gross * 0.97 (3% market fee deduction).\n"
-            "- Return strictly integer numbers.\n"
-            "- Output JSON ONLY with this exact format:\n"
-            '{"boxes": <number>, "gross": <number>, "net": <number>}'
+            "/no_think\n"
+            "اقرأ فاتورة السوق المركزي لبيع الخضار في الصورة الرأسية:\n"
+            "1. عمود الكمية: اجمع كل الأرقام الموجودة في عمود الكمية لجميع سطور الخيار.\n"
+            "2. الرصيد المتبقي: اقرأ الرقم المكتوب في خانة 'الرصيد المتبقي' بعد خصم 3% دلالة، والمطابق للتفقيط النصي أسفل الفاتورة.\n\n"
+            "اكتب النتيجة بهذين السطرين فقط:\n"
+            "BOXES: <مجموع الصناديق>\n"
+            "NET: <المبلغ الصافي>"
         )
 
         chat_completion = groq_client.chat.completions.create(
             messages=[
-                {
-                    "role": "system",
-                    "content": "You are a specialized invoice JSON parser. Output only valid JSON without explanations."
-                },
                 {
                     "role": "user",
                     "content": [
@@ -476,51 +469,47 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
                     ],
                 }
             ],
-            model="meta-llama/llama-4-scout-17b-vision",
-            temperature=0.0,
-            max_tokens=150
+            model="qwen/qwen3.6-27b",
+            max_tokens=250,
+            temperature=0.0
         )
 
         raw = chat_completion.choices[0].message.content.strip()
+        clean_text = re.sub(r"<think>[\s\S]*?</think>", "", raw).strip() or raw
 
         boxes = 0.0
-        gross = 0.0
         net = 0.0
 
-        json_match = re.search(r"\{[^{}]*\}", raw)
-        if json_match:
-            try:
-                data = json.loads(json_match.group(0))
-                boxes = float(data.get("boxes", 0))
-                gross = float(data.get("gross", 0))
-                net = float(data.get("net", 0))
-            except Exception:
-                pass
+        b_m = re.search(r"BOXES\s*[:=]\s*(\d+)", clean_text, re.IGNORECASE)
+        n_m = re.search(r"NET\s*[:=]\s*([\d,]+)", clean_text, re.IGNORECASE)
 
-        if net == 0 and gross > 0:
-            net = round(gross * 0.97)
+        if b_m:
+            boxes = float(b_m.group(1))
+        if n_m:
+            net = float(n_m.group(1).replace(",", ""))
 
+        # تأمين استخراج الأرقام إذا كتبها النموذج داخل فقرة
         if net == 0:
-            big_nums = [float(x.replace(",", "")) for x in re.findall(r"\b\d{5,7}\b", raw)]
+            big_nums = [float(x.replace(",", "")) for x in re.findall(r"\b\d{5,7}\b", clean_text)]
             if big_nums:
-                valid_amounts = [n for n in big_nums if n != 21400]
-                if len(valid_amounts) >= 2:
-                    gross = max(valid_amounts)
+                # استبعاد رقم الاستمارة المطبوع
+                valid_amounts = [x for x in big_nums if x not in [21400, 21401]]
+                if valid_amounts:
                     net = min(valid_amounts)
-                elif len(valid_amounts) == 1:
-                    gross = valid_amounts[0]
-                    net = round(gross * 0.97)
+
+        if boxes == 0:
+            small_nums = [float(x) for x in re.findall(r"\b([1-9]|1[0-9])\b", clean_text) if float(x) != 3.0]
+            if small_nums:
+                boxes = small_nums[0]
 
         return {
             "boxes_count": boxes,
             "invoice_net_amount": net,
-            "currency": "ريال يمني",
-            "raw_debug": raw
+            "currency": "ريال يمني"
         }
 
     except Exception as e:
         return {"error": str(e)}
-
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.photo:
