@@ -255,7 +255,7 @@ def add_transaction(
     currency="ريال يمني",
     operation="",
     explanation="",
-    user_name="مستخدم"
+    user_name="حسام"
 ):
     date_string = get_date_string()
     transaction_id = generate_transaction_id()
@@ -350,7 +350,7 @@ async def notify_admins(context: ContextTypes.DEFAULT_TYPE, message_text: str, s
 
 
 # =========================================================
-# معالجة الفواتير (تفاعلي + يدوي)
+# معالجة الفواتير (تظهر رسالة تم قيد كذا وكذا والرصيد)
 # =========================================================
 
 def process_invoice_entry(boxes: float, invoice_net: float, currency: str, user_name: str) -> str:
@@ -359,22 +359,53 @@ def process_invoice_entry(boxes: float, invoice_net: float, currency: str, user_
     total_deductions = packing_cost + transport_cost
     final_net = invoice_net - total_deductions
 
-    rev_res = add_transaction("إيراد", "مبيعات خيار", f"فاتورة {boxes:.0f} صندوق", invoice_net, currency, "بيع", "", user_name)
-    add_transaction("مصروف", "تغليف وكراتين", f"تكييس {boxes:.0f} صندوق", -packing_cost, currency, "صرف", "", user_name)
-    add_transaction("مصروف", "نقل وتسويق", f"نقل {boxes:.0f} صندوق", -transport_cost, currency, "صرف", "", user_name)
+    # 1. إيراد المبيعات
+    rev_res = add_transaction(
+        "إيراد", 
+        "مبيعات خيار", 
+        f"فاتورة مبيعات {boxes:.0f} صندوق", 
+        invoice_net, 
+        currency, 
+        "بيع", 
+        f"صافي الفاتورة لعدد {boxes:.0f} صندوق", 
+        user_name
+    )
+
+    # 2. تكييس
+    add_transaction(
+        "مصروف", 
+        "تغليف وكراتين", 
+        f"تكييس {boxes:.0f} صندوق", 
+        -packing_cost, 
+        currency, 
+        "صرف", 
+        "أجرة تكييس الصناديق", 
+        user_name
+    )
+
+    # 3. نقل
+    add_transaction(
+        "مصروف", 
+        "نقل وتسويق", 
+        f"نقل {boxes:.0f} صندوق", 
+        -transport_cost, 
+        currency, 
+        "صرف", 
+        "أجرة نقل المحصول للسوق", 
+        user_name
+    )
 
     final_balance = rev_res['balance'] - total_deductions
 
     summary = (
-        f"✅ *تم قيد الفاتورة بنجاح*\n"
+        f"✅ *تم قيد الفاتورة في الحسابات:*\n"
         f"━━━━━━━━━━━━━━━\n"
-        f"📦 عدد الصناديق: *{boxes:,.0f}*\n"
-        f"💵 صافي الفاتورة: *{invoice_net:,.0f}* {currency}\n"
-        f"✂️ تكلفة التكييس: *{packing_cost:,.0f}* {currency}\n"
-        f"🚚 تكلفة النقل: *{transport_cost:,.0f}* {currency}\n"
-        f"💰 الصافي النهائي للمزرعة: *{final_net:,.0f}* {currency}\n"
+        f"🟢 *تم قيد إيراد:* {invoice_net:,.0f} {currency} (مبيعات {boxes:.0f} صندوق)\n"
+        f"🔴 *تم قيد مصروف:* {packing_cost:,.0f} {currency} (تكييس)\n"
+        f"🔴 *تم قيد مصروف:* {transport_cost:,.0f} {currency} (نقل)\n"
         f"━━━━━━━━━━━━━━━\n"
-        f"🏦 رصيد الكاش الحالي: *{final_balance:,.0f}* {currency}"
+        f"💰 *الصافي المقيد للمحمية:* {final_net:,.0f} {currency}\n"
+        f"🏦 *رصيد الكاش الحالي:* {final_balance:,.0f} {currency}"
     )
     return summary
 
@@ -416,8 +447,8 @@ async def invoice_get_net(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["invoice_net"] = nums[0]
     await update.message.reply_text(
         f"💵 تم تحديد صافي الفاتورة: *{nums[0]:,.0f} ريال*\n\n"
-        "الآن *أرسل صورة الفاتورة* لتوثيقها في الشات:\n"
-        "*(أو أرسل /skip لتسجيلها بدون صورة)*",
+        "الآن *أرسل صورة الفاتورة* لتوثيقها في المحادثة:\n"
+        "*(أو أرسل /skip للتسجيل مباشرة دون صورة)*",
         parse_mode="Markdown"
     )
     return WAIT_PHOTO
@@ -428,6 +459,7 @@ async def invoice_finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.effective_user.first_name or "حسام"
 
     summary = process_invoice_entry(boxes, net_amt, "ريال يمني", user_name)
+
     await update.message.reply_text(summary, parse_mode="Markdown")
     await notify_admins(context, summary, update.effective_chat.id)
 
@@ -438,29 +470,6 @@ async def invoice_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     await update.message.reply_text("❌ تم إلغاء تسجيل الفاتورة.")
     return ConversationHandler.END
-
-async def handle_direct_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.photo:
-        return
-
-    caption = (update.message.caption or "").strip()
-    caption_nums = extract_numbers(caption)
-
-    if len(caption_nums) >= 2:
-        boxes = caption_nums[0]
-        invoice_net = caption_nums[1]
-        currency = detect_currency(caption)
-        user_name = update.effective_user.first_name or "حسام"
-
-        summary = process_invoice_entry(boxes, invoice_net, currency, user_name)
-        await update.message.reply_text(summary, parse_mode="Markdown")
-        await notify_admins(context, summary, update.effective_chat.id)
-    else:
-        await update.message.reply_text(
-            "💡 *لتسجيل هذه الفاتورة:*\n"
-            "اضغط على زر *«📥 إضافة فاتورة مبيعات»* من القائمة، أو أعد إرسال الصورة واكتب في وصفها: عدد الصناديق والمبلغ (مثال: `9 118825`).",
-            parse_mode="Markdown"
-        )
 
 
 # =========================================================
@@ -505,11 +514,14 @@ async def handle_exchange(update: Update, context: ContextTypes.DEFAULT_TYPE, te
         ])
 
     reply = (
-        f"💱 *صرافة:* {sar_amount:,.0f} ر.س\n"
-        f"💵 *المستلم:* {yer_amount:,.0f} ر.ي\n"
-        f"📈 *السعر:* {rate:,.0f}\n"
-        f"🇸🇦 *رصيد سعودي:* {new_sar_balance:,.0f}\n"
-        f"🇾🇪 *رصيد يمني:* {new_yer_balance:,.0f}"
+        f"💱 *تم تسجيل عملية صرافة:*\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"🔴 خصم: *{sar_amount:,.0f}* ر.س\n"
+        f"🟢 استلام: *{yer_amount:,.0f}* ر.ي\n"
+        f"📈 السعر: *{rate:,.0f}*\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"🇸🇦 رصيد سعودي: *{new_sar_balance:,.0f}* ر.س\n"
+        f"🇾🇪 رصيد يمني: *{new_yer_balance:,.0f}* ر.ي"
     )
 
     await update.message.reply_text(reply, parse_mode="Markdown")
@@ -519,7 +531,7 @@ async def handle_exchange(update: Update, context: ContextTypes.DEFAULT_TYPE, te
 
 
 # =========================================================
-# دوال التقارير وتصدير الـ PDF
+# التقارير والـ PDF
 # =========================================================
 
 def get_today_report():
@@ -773,7 +785,7 @@ def generate_pdf_report():
 
 
 # =========================================================
-# واجهة الأزرار (تم وضع "إضافة فاتورة مبيعات" بدلاً من "بيع الخيار")
+# واجهة الأزرار الكاملة (17 زراً)
 # =========================================================
 
 def get_main_keyboard():
@@ -819,7 +831,7 @@ def get_main_keyboard():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
         "🌱 *أهلاً بك حسام في نظام إدارة مشروع المحمية* 🥒\n\n"
-        "يمكنك إرسال العمليات نصياً أو الضغط على *«📥 إضافة فاتورة مبيعات»* لتسجيل الفاتورة وحساب التكييس والنقل والصافي تلقائياً.\n\n"
+        "يمكنك إرسال العمليات نصياً أو الضغط على *«📥 إضافة فاتورة مبيعات»* لتسجيل الفاتورة وحساب التكييس والنقل فوراً.\n\n"
         "*أمثلة سريعة:*\n"
         "📸 أرسل صورة فاتورة الحراج واكتب في وصفها: `9 118825`\n"
         "⚖️ إنتاج اليوم 750 كيلو\n"
@@ -938,8 +950,31 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================================================
-# معالجة الرسائل النصية المباشرة
+# معالجة الصور والنصوص
 # =========================================================
+
+async def handle_direct_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.photo:
+        return
+
+    caption = (update.message.caption or "").strip()
+    caption_nums = extract_numbers(caption)
+
+    if len(caption_nums) >= 2:
+        boxes = caption_nums[0]
+        invoice_net = caption_nums[1]
+        currency = detect_currency(caption)
+        user_name = update.effective_user.first_name or "حسام"
+
+        summary = process_invoice_entry(boxes, invoice_net, currency, user_name)
+        await update.message.reply_text(summary, parse_mode="Markdown")
+        await notify_admins(context, summary, update.effective_chat.id)
+    else:
+        await update.message.reply_text(
+            "💡 *لتسجيل هذه الفاتورة:*\n"
+            "اضغط على زر *«📥 إضافة فاتورة مبيعات»* من القائمة، أو أعد إرسال الصورة واكتب في وصفها: عدد الصناديق والمبلغ (مثال: `9 118825`).",
+            parse_mode="Markdown"
+        )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
@@ -985,11 +1020,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_name=user_name
     )
 
+    action_label = "🟢 تم قيد إيراد" if transaction["type"] == "إيراد" else ("⚖️ تم تسجيل إنتاج" if transaction["type"] == "إنتاج" else "🔴 تم قيد مصروف")
+
     reply = (
-        f"🏷️ *النوع:* {transaction['type']}\n"
-        f"📋 *الفئة:* {transaction['category']}\n"
-        f"💰 *المبلغ / الكمية:* {abs(transaction['amount']):,.0f} {transaction['currency']}\n"
-        f"🏦 *الرصيد:* {result['balance']:,.0f} {transaction['currency']}"
+        f"✅ *تم قيد العملية بنجاح:*\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"{action_label}: *{abs(transaction['amount']):,.0f}* {transaction['currency']}\n"
+        f"📋 البيان: {transaction['details']}\n"
+        f"🏷️ الفئة: {transaction['category']}\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"🏦 الرصيد الحالي: *{result['balance']:,.0f}* {transaction['currency']}"
     )
     await update.message.reply_text(reply, parse_mode="Markdown")
     await notify_admins(context, reply, update.effective_chat.id)
@@ -1005,7 +1045,6 @@ if __name__ == "__main__":
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # محادثة إدخال الفاتورة التفاعلية لزر "إضافة فاتورة مبيعات"
     invoice_conv_handler = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(invoice_start, pattern="^cmd_invoice_start$"),
@@ -1030,7 +1069,7 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     print("=" * 50)
-    print("🤖 بوت إدارة المحمية يعمل بكامل الأزرار مع ميزة إضافة الفاتورة التفاعلية")
+    print("🤖 بوت إدارة المحمية يعمل بنظام القيد الكامل للأرصدة")
     print("=" * 50)
 
     app.run_polling(drop_pending_updates=True)
