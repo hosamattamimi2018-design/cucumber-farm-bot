@@ -1,5 +1,6 @@
 import os
 import io
+import sys
 import datetime
 import re
 import uuid
@@ -58,22 +59,25 @@ SHEET_NAME = "Sheet1"
 
 
 # =========================================================
-# تنزيل وتهيئة الخط العربي للـ PDF
+# تنزيل وتهيئة الخط العربي للـ PDF بحماية كاملة
 # =========================================================
 
 ARABIC_FONT_PATH = "Amiri-Regular.ttf"
+DEFAULT_FONT = 'Helvetica'
+
 if not os.path.exists(ARABIC_FONT_PATH):
     try:
         font_url = "https://raw.githubusercontent.com/google/fonts/main/ofl/amiri/Amiri-Regular.ttf"
         urllib.request.urlretrieve(font_url, ARABIC_FONT_PATH)
     except Exception as e:
-        print(f"Error downloading font: {e}")
+        print(f"Font download warning: {e}")
 
 if os.path.exists(ARABIC_FONT_PATH):
-    pdfmetrics.registerFont(TTFont('Amiri', ARABIC_FONT_PATH))
-    DEFAULT_FONT = 'Amiri'
-else:
-    DEFAULT_FONT = 'Helvetica'
+    try:
+        pdfmetrics.registerFont(TTFont('Amiri', ARABIC_FONT_PATH))
+        DEFAULT_FONT = 'Amiri'
+    except Exception as e:
+        print(f"Font registration warning: {e}")
 
 
 # =========================================================
@@ -102,29 +106,6 @@ def run_web_server():
 # الاتصال بـ Google Sheets
 # =========================================================
 
-scope = [
-    "https://spreadsheets.google.com/feeds",
-    "https://www.googleapis.com/auth/drive"
-]
-
-creds = ServiceAccountCredentials.from_json_keyfile_name(
-    CREDENTIALS_FILE,
-    scope
-)
-
-client = gspread.authorize(creds)
-spreadsheet = client.open_by_url(SPREADSHEET_URL)
-
-try:
-    sheet = spreadsheet.worksheet(SHEET_NAME)
-except gspread.WorksheetNotFound:
-    sheet = spreadsheet.add_worksheet(
-        title=SHEET_NAME,
-        rows=1000,
-        cols=11
-    )
-
-
 HEADERS = [
     "التاريخ",
     "النوع",
@@ -139,17 +120,42 @@ HEADERS = [
     "بواسطة"
 ]
 
-def ensure_headers():
-    first_row = sheet.row_values(1)
-    if not first_row:
-        sheet.append_row(HEADERS)
-    elif first_row[:len(HEADERS)] != HEADERS:
-        sheet.update(
-            range_name="A1:K1",
-            values=[HEADERS]
-        )
+sheet = None
 
-ensure_headers()
+def init_google_sheet():
+    global sheet
+    try:
+        if not os.path.exists(CREDENTIALS_FILE):
+            print(f"CRITICAL: '{CREDENTIALS_FILE}' not found! Please upload it as a Secret File in Render.")
+            return
+
+        scope = [
+            "https://spreadsheets.google.com/feeds",
+            "https://www.googleapis.com/auth/drive"
+        ]
+        creds = ServiceAccountCredentials.from_json_keyfile_name(
+            CREDENTIALS_FILE,
+            scope
+        )
+        client = gspread.authorize(creds)
+        spreadsheet = client.open_by_url(SPREADSHEET_URL)
+        
+        try:
+            sheet = spreadsheet.worksheet(SHEET_NAME)
+        except gspread.WorksheetNotFound:
+            sheet = spreadsheet.add_worksheet(title=SHEET_NAME, rows=1000, cols=11)
+
+        first_row = sheet.row_values(1)
+        if not first_row:
+            sheet.append_row(HEADERS)
+        elif first_row[:len(HEADERS)] != HEADERS:
+            sheet.update(range_name="A1:K1", values=[HEADERS])
+            
+        print("Connected to Google Sheets successfully!")
+    except Exception as e:
+        print(f"CRITICAL GOOGLE SHEETS ERROR: {e}")
+
+init_google_sheet()
 
 
 # =========================================================
@@ -216,32 +222,34 @@ def extract_quantity(text):
 # =========================================================
 
 def calculate_balances():
-    records = sheet.get_all_values()
-    balances = {
-        "ريال سعودي": 0.0,
-        "ريال يمني": 0.0
-    }
-
-    if len(records) <= 1:
+    balances = {"ريال سعودي": 0.0, "ريال يمني": 0.0}
+    if not sheet:
         return balances
 
-    for row in records[1:]:
-        if len(row) < 6:
-            continue
+    try:
+        records = sheet.get_all_values()
+        if len(records) <= 1:
+            return balances
 
-        transaction_type = row[1].strip()
-        currency = row[5].strip()
+        for row in records[1:]:
+            if len(row) < 6:
+                continue
 
-        try:
-            amount = float(row[4].replace(",", "").strip())
-        except Exception:
-            continue
+            transaction_type = row[1].strip()
+            currency = row[5].strip()
 
-        if transaction_type in ["إنتاج", "آجل / دين"]:
-            continue
+            try:
+                amount = float(row[4].replace(",", "").strip())
+            except Exception:
+                continue
 
-        if currency in balances:
-            balances[currency] += amount
+            if transaction_type in ["إنتاج", "آجل / دين"]:
+                continue
+
+            if currency in balances:
+                balances[currency] += amount
+    except Exception as e:
+        print(f"Error calculate_balances: {e}")
 
     return balances
 
@@ -280,7 +288,11 @@ def add_transaction(
         user_name
     ]
 
-    sheet.append_row(row, value_input_option="USER_ENTERED")
+    if sheet:
+        try:
+            sheet.append_row(row, value_input_option="USER_ENTERED")
+        except Exception as e:
+            print(f"Error append_row: {e}")
 
     return {
         "date": date_string,
@@ -358,7 +370,7 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
         img = Image.open(io.BytesIO(image_bytes))
         img = ImageOps.exif_transpose(img)
 
-        # تعديل الاتجاه إذا كانت الصورة عرضية لتصبح رأسية
+        # تعديل الاتجاه إذا كانت الصورة مائلة
         if img.width > img.height:
             img = img.rotate(-90, expand=True)
 
@@ -405,7 +417,7 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
             }
         }
 
-        res = requests.post(url, headers=headers, json=payload, timeout=30)
+        res = requests.post(url, headers=headers, json=payload, timeout=35)
         
         if res.status_code != 200:
             return {"error": f"HTTP {res.status_code}: {res.text}"}
@@ -505,153 +517,140 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 
 def get_today_report():
-    records = sheet.get_all_values()
     today = get_today_string()
-    production = 0.0
-    sar_income = 0.0
-    sar_expense = 0.0
-    yer_income = 0.0
-    yer_expense = 0.0
-    transactions_count = 0
+    res = {"production": 0.0, "sar_income": 0.0, "sar_expense": 0.0, "yer_income": 0.0, "yer_expense": 0.0, "count": 0}
+    if not sheet:
+        return res
 
-    for row in records[1:]:
-        if len(row) < 6 or not row[0].startswith(today):
-            continue
+    try:
+        records = sheet.get_all_values()
+        for row in records[1:]:
+            if len(row) < 6 or not row[0].startswith(today):
+                continue
 
-        transactions_count += 1
-        transaction_type = row[1]
-        try:
-            amount = float(row[4].replace(",", ""))
-        except Exception:
-            continue
-        currency = row[5]
+            res["count"] += 1
+            transaction_type = row[1]
+            try:
+                amount = float(row[4].replace(",", ""))
+            except Exception:
+                continue
+            currency = row[5]
 
-        if transaction_type == "إنتاج":
-            production += abs(amount)
-        elif currency == "ريال سعودي":
-            if transaction_type == "إيراد":
-                sar_income += abs(amount)
-            elif transaction_type == "مصروف":
-                sar_expense += abs(amount)
-        elif currency == "ريال يمني":
-            if transaction_type == "إيراد":
-                yer_income += abs(amount)
-            elif transaction_type == "مصروف":
-                yer_expense += abs(amount)
+            if transaction_type == "إنتاج":
+                res["production"] += abs(amount)
+            elif currency == "ريال سعودي":
+                if transaction_type == "إيراد":
+                    res["sar_income"] += abs(amount)
+                elif transaction_type == "مصروف":
+                    res["sar_expense"] += abs(amount)
+            elif currency == "ريال يمني":
+                if transaction_type == "إيراد":
+                    res["yer_income"] += abs(amount)
+                elif transaction_type == "مصروف":
+                    res["yer_expense"] += abs(amount)
+    except Exception as e:
+        print(f"Error get_today_report: {e}")
 
-    return {
-        "production": production,
-        "sar_income": sar_income,
-        "sar_expense": sar_expense,
-        "yer_income": yer_income,
-        "yer_expense": yer_expense,
-        "count": transactions_count
-    }
+    return res
 
 def get_month_report():
-    records = sheet.get_all_values()
     current_month = get_now().strftime("%Y-%m")
-    production = 0.0
-    sar_income = 0.0
-    sar_expense = 0.0
-    yer_income = 0.0
-    yer_expense = 0.0
-    count = 0
+    res = {"production": 0.0, "sar_income": 0.0, "sar_expense": 0.0, "yer_income": 0.0, "yer_expense": 0.0, "count": 0}
+    if not sheet:
+        return res
 
-    for row in records[1:]:
-        if len(row) < 6 or not row[0].startswith(current_month):
-            continue
+    try:
+        records = sheet.get_all_values()
+        for row in records[1:]:
+            if len(row) < 6 or not row[0].startswith(current_month):
+                continue
 
-        count += 1
-        transaction_type = row[1]
-        try:
-            amount = float(row[4].replace(",", ""))
-        except Exception:
-            continue
-        currency = row[5]
+            res["count"] += 1
+            transaction_type = row[1]
+            try:
+                amount = float(row[4].replace(",", ""))
+            except Exception:
+                continue
+            currency = row[5]
 
-        if transaction_type == "إنتاج":
-            production += abs(amount)
-        elif currency == "ريال سعودي":
-            if transaction_type == "إيراد":
-                sar_income += abs(amount)
-            elif transaction_type == "مصروف":
-                sar_expense += abs(amount)
-        elif currency == "ريال يمني":
-            if transaction_type == "إيراد":
-                yer_income += abs(amount)
-            elif transaction_type == "مصروف":
-                yer_expense += abs(amount)
+            if transaction_type == "إنتاج":
+                res["production"] += abs(amount)
+            elif currency == "ريال سعودي":
+                if transaction_type == "إيراد":
+                    res["sar_income"] += abs(amount)
+                elif transaction_type == "مصروف":
+                    res["sar_expense"] += abs(amount)
+            elif currency == "ريال يمني":
+                if transaction_type == "إيراد":
+                    res["yer_income"] += abs(amount)
+                elif transaction_type == "مصروف":
+                    res["yer_expense"] += abs(amount)
+    except Exception as e:
+        print(f"Error get_month_report: {e}")
 
-    return {
-        "production": production,
-        "sar_income": sar_income,
-        "sar_expense": sar_expense,
-        "yer_income": yer_income,
-        "yer_expense": yer_expense,
-        "count": count
-    }
+    return res
 
 def get_profit_report():
-    records = sheet.get_all_values()
-    sar_income = 0.0
-    sar_expense = 0.0
-    yer_income = 0.0
-    yer_expense = 0.0
-    total_production = 0.0
+    res = {"production": 0.0, "sar_income": 0.0, "sar_expense": 0.0, "sar_profit": 0.0, "yer_income": 0.0, "yer_expense": 0.0, "yer_profit": 0.0}
+    if not sheet:
+        return res
 
-    for row in records[1:]:
-        if len(row) < 6:
-            continue
+    try:
+        records = sheet.get_all_values()
+        for row in records[1:]:
+            if len(row) < 6:
+                continue
 
-        transaction_type = row[1]
-        try:
-            amount = float(row[4].replace(",", ""))
-        except Exception:
-            continue
-        currency = row[5]
+            transaction_type = row[1]
+            try:
+                amount = float(row[4].replace(",", ""))
+            except Exception:
+                continue
+            currency = row[5]
 
-        if transaction_type == "إنتاج":
-            total_production += abs(amount)
-        elif transaction_type == "إيراد":
-            if currency == "ريال سعودي":
-                sar_income += abs(amount)
-            elif currency == "ريال يمني":
-                yer_income += abs(amount)
-        elif transaction_type == "مصروف":
-            if currency == "ريال سعودي":
-                sar_expense += abs(amount)
-            elif currency == "ريال يمني":
-                yer_expense += abs(amount)
+            if transaction_type == "إنتاج":
+                res["production"] += abs(amount)
+            elif transaction_type == "إيراد":
+                if currency == "ريال سعودي":
+                    res["sar_income"] += abs(amount)
+                elif currency == "ريال يمني":
+                    res["yer_income"] += abs(amount)
+            elif transaction_type == "مصروف":
+                if currency == "ريال سعودي":
+                    res["sar_expense"] += abs(amount)
+                elif currency == "ريال يمني":
+                    res["yer_expense"] += abs(amount)
 
-    return {
-        "production": total_production,
-        "sar_income": sar_income,
-        "sar_expense": sar_expense,
-        "sar_profit": sar_income - sar_expense,
-        "yer_income": yer_income,
-        "yer_expense": yer_expense,
-        "yer_profit": yer_income - yer_expense
-    }
+        res["sar_profit"] = res["sar_income"] - res["sar_expense"]
+        res["yer_profit"] = res["yer_income"] - res["yer_expense"]
+    except Exception as e:
+        print(f"Error get_profit_report: {e}")
+
+    return res
 
 def get_debts():
-    records = sheet.get_all_values()
     sar_debt = 0.0
     yer_debt = 0.0
+    if not sheet:
+        return sar_debt, yer_debt
 
-    for row in records[1:]:
-        if len(row) < 6 or row[1] != "آجل / دين":
-            continue
+    try:
+        records = sheet.get_all_values()
+        for row in records[1:]:
+            if len(row) < 6 or row[1] != "آجل / دين":
+                continue
 
-        try:
-            amount = abs(float(row[4].replace(",", "")))
-        except Exception:
-            continue
+            try:
+                amount = abs(float(row[4].replace(",", "")))
+            except Exception:
+                continue
 
-        if row[5] == "ريال سعودي":
-            sar_debt += amount
-        elif row[5] == "ريال يمني":
-            yer_debt += amount
+            if row[5] == "ريال سعودي":
+                sar_debt += amount
+            elif row[5] == "ريال يمني":
+                yer_debt += amount
+    except Exception as e:
+        print(f"Error get_debts: {e}")
 
     return sar_debt, yer_debt
 
@@ -723,7 +722,6 @@ def generate_pdf_report():
     elements.append(Paragraph(format_ar_pdf("آخر العمليات المسجلة في النظام"), title_style))
     elements.append(Spacer(1, 5))
 
-    records = sheet.get_all_values()
     trans_rows = [[
         format_ar_pdf("التاريخ"),
         format_ar_pdf("النوع"),
@@ -732,18 +730,23 @@ def generate_pdf_report():
         format_ar_pdf("العملة")
     ]]
 
-    if len(records) > 1:
-        recent_records = records[1:][-10:]
-        recent_records.reverse()
-        for r in recent_records:
-            if len(r) >= 6:
-                trans_rows.append([
-                    r[0][:16],
-                    format_ar_pdf(r[1]),
-                    format_ar_pdf(r[2]),
-                    r[4],
-                    format_ar_pdf(r[5])
-                ])
+    if sheet:
+        try:
+            records = sheet.get_all_values()
+            if len(records) > 1:
+                recent_records = records[1:][-10:]
+                recent_records.reverse()
+                for r in recent_records:
+                    if len(r) >= 6:
+                        trans_rows.append([
+                            r[0][:16],
+                            format_ar_pdf(r[1]),
+                            format_ar_pdf(r[2]),
+                            r[4],
+                            format_ar_pdf(r[5])
+                        ])
+        except Exception as e:
+            print(f"Error reading records for pdf: {e}")
 
     trans_table = Table(trans_rows, colWidths=[120, 90, 140, 90, 80])
     trans_table.setStyle(TableStyle([
@@ -787,21 +790,22 @@ async def handle_exchange(update: Update, context: ContextTypes.DEFAULT_TYPE, te
     new_sar_balance = balances["ريال سعودي"] - sar_amount
     new_yer_balance = balances["ريال يمني"] + yer_amount
 
-    sheet.append_row([
-        date_string, "تحويل عملة", "صرافة",
-        f"صرف {sar_amount} ريال سعودي بسعر {rate}",
-        -sar_amount, "ريال سعودي", "صرافة",
-        new_sar_balance, f"تحويل سعودي إلى يمني بسعر {rate}",
-        transaction_id, user_name
-    ])
+    if sheet:
+        sheet.append_row([
+            date_string, "تحويل عملة", "صرافة",
+            f"صرف {sar_amount} ريال سعودي بسعر {rate}",
+            -sar_amount, "ريال سعودي", "صرافة",
+            new_sar_balance, f"تحويل سعودي إلى يمني بسعر {rate}",
+            transaction_id, user_name
+        ])
 
-    sheet.append_row([
-        date_string, "تحويل عملة", "صرافة",
-        f"استلام {yer_amount} ريال يمني",
-        yer_amount, "ريال يمني", "صرافة",
-        new_yer_balance, f"مقابل {sar_amount} ريال سعودي بسعر {rate}",
-        transaction_id, user_name
-    ])
+        sheet.append_row([
+            date_string, "تحويل عملة", "صرافة",
+            f"استلام {yer_amount} ريال يمني",
+            yer_amount, "ريال يمني", "صرافة",
+            new_yer_balance, f"مقابل {sar_amount} ريال سعودي بسعر {rate}",
+            transaction_id, user_name
+        ])
 
     reply = (
         f"💱 صرافة: {sar_amount:,.0f} ر.س\n"
@@ -905,13 +909,15 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await query.message.reply_text(f"❌ {e}")
     elif action == "cmd_undo":
+        if not sheet:
+            await query.message.reply_text("⚠️ لم يتم الاتصال بالشيت بعد")
+            return
         records = sheet.get_all_values()
         if len(records) <= 1:
             await query.message.reply_text("⚠️ لا توجد عمليات لحذفها")
             return
         last_row = records[-1]
         sheet.delete_rows(len(records))
-        user_name = update.effective_user.first_name or "مستخدم"
         reply = f"🔄 تم حذف آخر عملية:\n{last_row[1]} | {last_row[4]} {last_row[5]}"
         await query.message.reply_text(reply)
         await notify_admins(context, reply, update.effective_chat.id)
