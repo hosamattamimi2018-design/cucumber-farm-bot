@@ -357,21 +357,23 @@ async def notify_admins(context: ContextTypes.DEFAULT_TYPE, message_text: str, s
 
 def parse_invoice_image(image_bytes: bytes) -> dict:
     try:
-        # قراءة project_id من ملف الاعتماد وتوليد Access Token رسمي
         project_id = ""
         if os.path.exists(CREDENTIALS_FILE):
             with open(CREDENTIALS_FILE, "r", encoding="utf-8") as f:
                 creds_data = json.load(f)
                 project_id = creds_data.get("project_id", "")
 
-        scope = ["https://www.googleapis.com/auth/cloud-platform"]
+        scope = [
+            "https://www.googleapis.com/auth/generative-language",
+            "https://www.googleapis.com/auth/generative-language.retriever",
+            "https://www.googleapis.com/auth/cloud-platform"
+        ]
         sa_creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
         access_token = sa_creds.get_access_token().access_token
 
         img = Image.open(io.BytesIO(image_bytes))
         img = ImageOps.exif_transpose(img)
 
-        # ضبط اتجاه الصورة الرأسي
         if img.width > img.height:
             img = img.rotate(-90, expand=True)
 
@@ -392,7 +394,7 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
         )
 
         url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
-        
+
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {access_token}"
@@ -421,7 +423,7 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
         }
 
         res = requests.post(url, headers=headers, json=payload, timeout=35)
-        
+
         if res.status_code != 200:
             return {"error": f"Google Error ({res.status_code}): {res.text}"}
 
