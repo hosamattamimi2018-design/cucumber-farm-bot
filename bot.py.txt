@@ -356,24 +356,13 @@ async def notify_admins(context: ContextTypes.DEFAULT_TYPE, message_text: str, s
 # =========================================================
 
 def parse_invoice_image(image_bytes: bytes) -> dict:
+    auth_key = "AQ.Ab8RN6KSSTX5Dw4xwdnBc_txO6RLv1w4Cb5CJabmg93JxUg_dw"
+
     try:
-        project_id = ""
-        if os.path.exists(CREDENTIALS_FILE):
-            with open(CREDENTIALS_FILE, "r", encoding="utf-8") as f:
-                creds_data = json.load(f)
-                project_id = creds_data.get("project_id", "")
-
-        scope = [
-            "https://www.googleapis.com/auth/generative-language",
-            "https://www.googleapis.com/auth/generative-language.retriever",
-            "https://www.googleapis.com/auth/cloud-platform"
-        ]
-        sa_creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
-        access_token = sa_creds.get_access_token().access_token
-
         img = Image.open(io.BytesIO(image_bytes))
         img = ImageOps.exif_transpose(img)
 
+        # تعديل اتجاه الصورة إذا كانت مائلة
         if img.width > img.height:
             img = img.rotate(-90, expand=True)
 
@@ -393,15 +382,13 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
             '{"boxes": <number>, "gross": <number>, "net": <number>}'
         )
 
-        # تم التحديث إلى gemini-3.6-flash
-        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent"
+        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
 
+        # هذا هو الهيدر الرسمي الوحيد المقبول لمفاتيح AQ المربوطة بحساب خدمة
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {access_token}"
+            "x-goog-api-key": auth_key
         }
-        if project_id:
-            headers["x-goog-user-project"] = project_id
 
         payload = {
             "contents": [
@@ -447,7 +434,6 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
 
     except Exception as e:
         return {"error": str(e)}
-
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.photo:
         return
