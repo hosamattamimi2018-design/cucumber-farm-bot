@@ -41,7 +41,7 @@ from bidi.algorithm import get_display
 # =========================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8943498488:AAFbsQw7oPJqqADrxYdo3k7eC1lZe5jgqm4")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyAKZXbEsmQJf6EIryq7W5o-izEGhixR-t0")
+GEMINI_AUTH_KEY = os.getenv("GEMINI_AUTH_KEY", "AQ.Ab8RN6KSSTX5Dw4xwdnBc_txO6RLv1w4Cb5CJabmg93JxUg_dw")
 
 ADMIN_IDS = [8646384325, 6017996704]
 
@@ -357,11 +357,6 @@ async def notify_admins(context: ContextTypes.DEFAULT_TYPE, message_text: str, s
 
 def parse_invoice_image(image_bytes: bytes) -> dict:
     try:
-        # استخدام ملف الحساب الخدمي لتوليد توكن الدخول الرسمي
-        scope = ["https://www.googleapis.com/auth/generative-language"]
-        sa_creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
-        token = sa_creds.get_access_token().access_token
-
         img = Image.open(io.BytesIO(image_bytes))
         img = ImageOps.exif_transpose(img)
 
@@ -385,12 +380,11 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
             '{"boxes": <number>, "gross": <number>, "net": <number>}'
         )
 
-        # تحديث الموديل إلى gemini-3.6-flash
-        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent"
+        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
         
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {token}"
+            "Authorization": f"Bearer {GEMINI_AUTH_KEY}"
         }
 
         payload = {
