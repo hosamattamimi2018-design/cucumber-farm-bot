@@ -535,57 +535,106 @@ async def handle_initial_command(update: Update, context: ContextTypes.DEFAULT_T
 # =========================================================
 
 async def handle_exchange(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
-    norm_text = convert_arabic_numbers(text)
-    pattern = r"^صرف\s+(\d+(?:\.\d+)?)\s*(?:سعودي|ر\.س|رس)?\s*بسعر\s*(\d+(?:\.\d+)?)"
-    match = re.search(pattern, norm_text, re.IGNORECASE)
-
-    if not match:
-        return False
-
-    sar_amount = float(match.group(1))
-    rate = float(match.group(2))
-    yer_amount = sar_amount * rate
+    norm_text = convert_arabic_numbers(text).lower()
+    
+    # 1. فحص التحويل العكسي: من يمني إلى سعودي (شراء سعودي باليمني)
+    pattern_to_sar = r"^صرف\s+(\d+(?:\.\d+)?)\s*(?:يمني|ريال يمني|ر\.ي|ري)?\s*بسعر\s*(\d+(?:\.\d+)?)"
+    match_to_sar = re.search(pattern_to_sar, norm_text)
+    
+    is_to_sar = False
+    if match_to_sar and any(w in norm_text for w in ["يمني", "ر.ي", "ري"]):
+        is_to_sar = True
+        yer_amount = float(match_to_sar.group(1))
+        rate = float(match_to_sar.group(2))
+        if rate <= 0:
+            return False
+        sar_amount = round(yer_amount / rate, 2)
+    else:
+        # 2. التحويل الافتراضي: من سعودي إلى يمني
+        pattern_to_yer = r"^صرف\s+(\d+(?:\.\d+)?)\s*(?:سعودي|ر\.س|رس)?\s*بسعر\s*(\d+(?:\.\d+)?)"
+        match_to_yer = re.search(pattern_to_yer, norm_text)
+        if not match_to_yer:
+            return False
+        
+        sar_amount = float(match_to_yer.group(1))
+        rate = float(match_to_yer.group(2))
+        yer_amount = round(sar_amount * rate, 2)
 
     transaction_id = generate_transaction_id()
     date_string = get_date_string()
     balances = calculate_balances()
     user_name = update.effective_user.first_name or "حسام"
 
-    new_sar_balance = balances["ريال سعودي"] - sar_amount
-    new_yer_balance = balances["ريال يمني"] + yer_amount
+    if is_to_sar:
+        # خصم يمني وإضافة سعودي
+        new_yer_balance = balances["ريال يمني"] - yer_amount
+        new_sar_balance = balances["ريال سعودي"] + sar_amount
 
-    if sheet:
-        sheet.append_row([
-            date_string, "تحويل عملة", "صرافة",
-            f"صرف {sar_amount} ريال سعودي بسعر {rate}",
-            -sar_amount, "ريال سعودي", "صرافة",
-            new_sar_balance, f"تحويل سعودي إلى يمني بسعر {rate}",
-            transaction_id, user_name
-        ])
+        if sheet:
+            sheet.append_row([
+                date_string, "تحويل عملة", "صرافة",
+                f"صرف {yer_amount:,.0f} ريال يمني بسعر {rate}",
+                -yer_amount, "ريال يمني", "صرافة",
+                new_yer_balance, f"تحويل يمني إلى سعودي بسعر {rate}",
+                transaction_id, user_name
+            ])
 
-        sheet.append_row([
-            date_string, "تحويل عملة", "صرافة",
-            f"استلام {yer_amount} ريال يمني",
-            yer_amount, "ريال يمني", "صرافة",
-            new_yer_balance, f"مقابل {sar_amount} ريال سعودي بسعر {rate}",
-            transaction_id, user_name
-        ])
+            sheet.append_row([
+                date_string, "تحويل عملة", "صرافة",
+                f"استلام {sar_amount:,.2f} ريال سعودي",
+                sar_amount, "ريال سعودي", "صرافة",
+                new_sar_balance, f"مقابل {yer_amount:,.0f} ريال يمني بسعر {rate}",
+                transaction_id, user_name
+            ])
 
-    reply = (
-        f"💱 *تم تسجيل عملية صرافة:*\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"🔴 خصم: *{sar_amount:,.0f}* ر.س\n"
-        f"🟢 استلام: *{yer_amount:,.0f}* ر.ي\n"
-        f"📈 السعر: *{rate:,.0f}*\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"🇸🇦 رصيد سعودي: *{new_sar_balance:,.0f}* ر.س\n"
-        f"🇾🇪 رصيد يمني: *{new_yer_balance:,.0f}* ر.ي"
-    )
+        reply = (
+            f"💱 *تم تسجيل صرافة (شراء سعودي):*\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"🔴 خصم: *{yer_amount:,.0f}* ر.ي\n"
+            f"🟢 استلام: *{sar_amount:,.2f}* ر.س\n"
+            f"📈 سعر الصرف: *{rate:,.0f}*\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"🇾🇪 رصيد يمني: *{new_yer_balance:,.0f}* ر.ي\n"
+            f"🇸🇦 رصيد سعودي: *{new_sar_balance:,.2f}* ر.س"
+        )
+    else:
+        # خصم سعودي وإضافة يمني
+        new_sar_balance = balances["ريال سعودي"] - sar_amount
+        new_yer_balance = balances["ريال يمني"] + yer_amount
+
+        if sheet:
+            sheet.append_row([
+                date_string, "تحويل عملة", "صرافة",
+                f"صرف {sar_amount:,.0f} ريال سعودي بسعر {rate}",
+                -sar_amount, "ريال سعودي", "صرافة",
+                new_sar_balance, f"تحويل سعودي إلى يمني بسعر {rate}",
+                transaction_id, user_name
+            ])
+
+            sheet.append_row([
+                date_string, "تحويل عملة", "صرافة",
+                f"استلام {yer_amount:,.0f} ريال يمني",
+                yer_amount, "ريال يمني", "صرافة",
+                new_yer_balance, f"مقابل {sar_amount:,.0f} ريال سعودي بسعر {rate}",
+                transaction_id, user_name
+            ])
+
+        reply = (
+            f"💱 *تم تسجيل صرافة (صرف سعودي):*\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"🔴 خصم: *{sar_amount:,.0f}* ر.س\n"
+            f"🟢 استلام: *{yer_amount:,.0f}* ر.ي\n"
+            f"📈 سعر الصرف: *{rate:,.0f}*\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"🇸🇦 رصيد سعودي: *{new_sar_balance:,.0f}* ر.س\n"
+            f"🇾🇪 رصيد يمني: *{new_yer_balance:,.0f}* ر.ي"
+        )
 
     await update.message.reply_text(reply, parse_mode="Markdown")
     await notify_admins(context, reply, update.effective_chat.id)
 
     return True
+
 
 
 # =========================================================
