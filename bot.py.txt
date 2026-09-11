@@ -357,10 +357,15 @@ async def notify_admins(context: ContextTypes.DEFAULT_TYPE, message_text: str, s
 
 def parse_invoice_image(image_bytes: bytes) -> dict:
     try:
+        # استخدام ملف الحساب الخدمي المعتمد في المشروع لتوليد توكن الدخول
+        scope = ["https://www.googleapis.com/auth/generative-language"]
+        sa_creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
+        token = sa_creds.get_access_token().access_token
+
         img = Image.open(io.BytesIO(image_bytes))
         img = ImageOps.exif_transpose(img)
 
-        # تعديل الاتجاه إذا كانت الصورة مائلة
+        # ضبط اتجاه الصورة الرأسي
         if img.width > img.height:
             img = img.rotate(-90, expand=True)
 
@@ -380,10 +385,11 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
             '{"boxes": <number>, "gross": <number>, "net": <number>}'
         )
 
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
         
         headers = {
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}"
         }
 
         payload = {
@@ -430,7 +436,6 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
 
     except Exception as e:
         return {"error": str(e)}
-
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.photo:
