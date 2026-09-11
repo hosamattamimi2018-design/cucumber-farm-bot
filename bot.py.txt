@@ -1,6 +1,5 @@
 import os
 import io
-import sys
 import datetime
 import re
 import uuid
@@ -42,10 +41,7 @@ from bidi.algorithm import get_display
 # =========================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8943498488:AAFbsQw7oPJqqADrxYdo3k7eC1lZe5jgqm4")
-GEMINI_API_KEY = os.getenv(
-    "GEMINI_API_KEY", 
-    "AQ.Ab8RN6JFI6IhAxRaSLSFgNxo8nfi9Ky_mwDtwhH1skvp6LdvuTw"
-)
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyAKZXbEsmQJf6EIryq7W5o-izEGhixR-t0")
 
 ADMIN_IDS = [8646384325, 6017996704]
 
@@ -59,7 +55,7 @@ SHEET_NAME = "Sheet1"
 
 
 # =========================================================
-# تنزيل وتهيئة الخط العربي للـ PDF بحماية كاملة
+# تنزيل وتهيئة الخط العربي للـ PDF
 # =========================================================
 
 ARABIC_FONT_PATH = "Amiri-Regular.ttf"
@@ -126,7 +122,7 @@ def init_google_sheet():
     global sheet
     try:
         if not os.path.exists(CREDENTIALS_FILE):
-            print(f"CRITICAL: '{CREDENTIALS_FILE}' not found! Please upload it as a Secret File in Render.")
+            print(f"CRITICAL: '{CREDENTIALS_FILE}' not found!")
             return
 
         scope = [
@@ -167,12 +163,6 @@ def convert_arabic_numbers(text: str) -> str:
     english_digits = "0123456789"
     table = str.maketrans(arabic_digits, english_digits)
     return text.translate(table)
-
-def format_number(number):
-    try:
-        return f"{float(number):,.2f}"
-    except Exception:
-        return "0.00"
 
 def format_ar_pdf(text: str) -> str:
     reshaped_text = arabic_reshaper.reshape(str(text))
@@ -362,7 +352,7 @@ async def notify_admins(context: ContextTypes.DEFAULT_TYPE, message_text: str, s
 
 
 # =========================================================
-# معالجة الفاتورة عبر REST API المباشر
+# معالجة الفاتورة عبر Gemini API الرسمي
 # =========================================================
 
 def parse_invoice_image(image_bytes: bytes) -> dict:
@@ -384,13 +374,12 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
             "استخرج البيانات التالية بدقة كأرقام صحيحة فقط:\n"
             "1. boxes: مجموع عمود الكمية (عدد الصناديق/السلات).\n"
             "2. gross: الإجمالي العام قبل الخصم.\n"
-            "3. net: الرصيد المتبقي الصافي (المطابق للتفقيط المكتوب بالكلمات).\n\n"
+            "3. net: الرصيد المتبقي الصافي (المطابق للتفقيط المكتوب بالكلمات أسفل الفاتورة).\n\n"
             "إذا تعذر قراءة الصافي: net = gross * 0.97.\n"
             "أخرج الناتج كـ JSON فقط بالصيغة:\n"
             '{"boxes": <number>, "gross": <number>, "net": <number>}'
         )
 
-        # تمرير المفتاح كـ query parameter في الرابط مباشرة لحل مشكلة التوثيق نهائياً
         url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
         
         headers = {
@@ -420,7 +409,7 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
         res = requests.post(url, headers=headers, json=payload, timeout=35)
         
         if res.status_code != 200:
-            return {"error": f"HTTP {res.status_code}: {res.text}"}
+            return {"error": f"Google Error ({res.status_code}): {res.text}"}
 
         resp_json = res.json()
         raw_text = resp_json['candidates'][0]['content']['parts'][0]['text'].strip()
@@ -458,7 +447,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         boxes = caption_nums[0]
         invoice_net = caption_nums[1]
     else:
-        status_msg = await update.message.reply_text("⏳ جاري تدقيق الفاتورة...")
+        status_msg = await update.message.reply_text("⏳ جاري تدقيق الفاتورة عبر Gemini...")
         try:
             photo_file = await update.message.photo[-1].get_file()
             photo_bytes = await photo_file.download_as_bytearray()
