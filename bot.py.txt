@@ -357,7 +357,13 @@ async def notify_admins(context: ContextTypes.DEFAULT_TYPE, message_text: str, s
 
 def parse_invoice_image(image_bytes: bytes) -> dict:
     try:
-        # استخدام ملف الحساب الخدمي لتوليد OAuth 2.0 Access Token رسمي
+        # قراءة project_id من ملف الاعتماد وتوليد Access Token رسمي
+        project_id = ""
+        if os.path.exists(CREDENTIALS_FILE):
+            with open(CREDENTIALS_FILE, "r", encoding="utf-8") as f:
+                creds_data = json.load(f)
+                project_id = creds_data.get("project_id", "")
+
         scope = ["https://www.googleapis.com/auth/cloud-platform"]
         sa_creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
         access_token = sa_creds.get_access_token().access_token
@@ -389,9 +395,10 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
         
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {access_token}",
-            "x-goog-user-project": sa_creds.project_id
+            "Authorization": f"Bearer {access_token}"
         }
+        if project_id:
+            headers["x-goog-user-project"] = project_id
 
         payload = {
             "contents": [
