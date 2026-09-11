@@ -351,17 +351,21 @@ async def notify_admins(context: ContextTypes.DEFAULT_TYPE, message_text: str, s
 # معالجة الفاتورة عبر Gemini Flash
 # =========================================================
 
-def parse_invoice_image(image_bytes: bytes) -> dict:
-    if not gemini_client:
-        return {"error": "لم يتم ضبط متغير GEMINI_API_KEY في Render"}
+import requests
 
+def parse_invoice_image(image_bytes: bytes) -> dict:
     try:
         img = Image.open(io.BytesIO(image_bytes))
         img = ImageOps.exif_transpose(img)
 
-        # تعديل اتجاه الصورة تلقائياً إذا كانت مائلة
+        # تعديل الاتجاه إذا كانت الصورة عرضية لتصبح رأسية
         if img.width > img.height:
             img = img.rotate(-90, expand=True)
+
+        img.thumbnail((1600, 1600))
+        buffered = io.BytesIO()
+        img.save(buffered, format="JPEG", quality=90)
+        img_b64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
 
         prompt = (
             "أنت مدقق محاسبي لفواتير سوق الخضار والفواكه المركزي.\n"
@@ -370,21 +374,46 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
             "2. gross: الإجمالي العام قبل الخصم.\n"
             "3. net: الرصيد المتبقي الصافي (المطابق للتفقيط المكتوب بالكلمات).\n\n"
             "إذا تعذر قراءة الصافي: net = gross * 0.97.\n"
-            "أخرج الناتج كـ JSON فقط:\n"
+            "أخرج الناتج كـ JSON فقط بالصيغة:\n"
             '{"boxes": <number>, "gross": <number>, "net": <number>}'
         )
 
-        response = gemini_client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=[img, prompt],
-            config=types.GenerateContentConfig(
-                temperature=0.0,
-                response_mime_type="application/json"
-            )
-        )
+        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+        
+        # إرسال المفتاح في x-goog-api-key مباشرة لتجاوز خطأ ACCESS_TOKEN_TYPE_UNSUPPORTED نهائياً
+        headers = {
+            "Content-Type": "application/json",
+            "x-goog-api-key": GEMINI_API_KEY
+        }
 
-        raw = response.text.strip()
-        data = json.loads(raw)
+        payload = {
+            "contents": [
+                {
+                    "parts": [
+                        {"text": prompt},
+                        {
+                            "inline_data": {
+                                "mime_type": "image/jpeg",
+                                "data": img_b64
+                            }
+                        }
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.0,
+                "response_mime_type": "application/json"
+            }
+        }
+
+        res = requests.post(url, headers=headers, json=payload, timeout=30)
+        
+        if res.status_code != 200:
+            return {"error": f"HTTP {res.status_code}: {res.text}"}
+
+        resp_json = res.json()
+        raw_text = resp_json['candidates'][0]['content']['parts'][0]['text'].strip()
+        data = json.loads(raw_text)
 
         boxes = float(data.get("boxes", 0))
         gross = float(data.get("gross", 0))
