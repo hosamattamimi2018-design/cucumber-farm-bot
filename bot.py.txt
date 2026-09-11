@@ -357,7 +357,7 @@ async def notify_admins(context: ContextTypes.DEFAULT_TYPE, message_text: str, s
 
 def parse_invoice_image(image_bytes: bytes) -> dict:
     try:
-        # استخدام ملف الحساب الخدمي المعتمد في المشروع لتوليد توكن الدخول
+        # استخدام ملف الحساب الخدمي لتوليد توكن الدخول الرسمي
         scope = ["https://www.googleapis.com/auth/generative-language"]
         sa_creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
         token = sa_creds.get_access_token().access_token
@@ -385,7 +385,8 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
             '{"boxes": <number>, "gross": <number>, "net": <number>}'
         )
 
-        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+        # تحديث الموديل إلى gemini-3.6-flash
+        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent"
         
         headers = {
             "Content-Type": "application/json",
