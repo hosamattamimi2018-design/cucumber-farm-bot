@@ -22,9 +22,9 @@ from telegram.ext import (
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-# مكتبة الذكاء الاصطناعي للرؤية
+# مكتبة الذكاء الاصطناعي للرؤية والمعالجة المسبقة للصور
 from groq import Groq
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageEnhance
 
 # مكتبات الـ PDF واللغة العربية
 from reportlab.lib.pagesizes import letter
@@ -421,11 +421,7 @@ async def notify_admins(context: ContextTypes.DEFAULT_TYPE, message_text: str, s
 
 
 # =========================================================
-# قراءة وتحليل صورة الفاتورة بالحسابات الرياضية المترابطة
-# =========================================================
-
-# =========================================================
-# تدقيق واستنتاج فواتير السوق المركزي وفق القواعد الحسابية
+# معالجة وتوضيح الصورة وتدقيق الفاتورة حسابياً
 # =========================================================
 
 def parse_invoice_image(image_bytes: bytes) -> dict:
@@ -433,36 +429,33 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
         return {"error": "لم يتم ضبط مفتاح GROQ_API_KEY"}
 
     try:
-       try:
         # 1. فتح الصورة وضبط الاتجاه
         img = Image.open(io.BytesIO(image_bytes))
         img = ImageOps.exif_transpose(img)
 
-        # 2. تحويل الصورة إلى تدرج رمادي لإلغاء ألوان الخلفية الكربونية
+        # 2. تحويل الصورة إلى تدرج رمادي لإلغاء ألوان ورق الكربون
         gray_img = img.convert('L')
 
-        # 3. موازنة السطوع التلقائية لجعل الورقة بيضاء
+        # 3. موازنة السطوع تلقائياً لجعل الخلفية بيضاء
         auto_img = ImageOps.autocontrast(gray_img, cutoff=2)
 
-        # 4. مضاعفة التباين والحدة لجعل الأرقام والكتابة سوداء بارزة
+        # 4. مضاعفة التباين والحدة لجعل الكتابة اليدوية والمطبوعة سوداء بارزة
         enhancer = ImageEnhance.Contrast(auto_img)
-        enhanced_img = enhancer.enhance(2.0)  # رفع التباين بمقدار الضعف
+        enhanced_img = enhancer.enhance(2.0)
 
         sharpener = ImageEnhance.Sharpness(enhanced_img)
-        clean_img = sharpener.enhance(1.8)    # زيادة حدة الخطوط والأرقام
+        clean_img = sharpener.enhance(1.8)
 
-        # 5. ضبط الحجم النهائي بجودة عالية
         clean_img.thumbnail((1600, 1600))
-        
         buffered = io.BytesIO()
         clean_img.save(buffered, format="JPEG", quality=95)
         base64_image = base64.b64encode(buffered.getvalue()).decode('utf-8')
 
         prompt = (
             "/no_think\n"
-            "أنت مدقق حسابات فواتير السوق المركزي للخضار والفواكه بوادي حضرموت.\n"
+            "أنت مدقق حسابات فواتير السوق المركزي (THE CENTER MARKET) لبيع الخضار والفواكه بوادي حضرموت.\n"
             "طبق القواعد المحاسبية الصارمة لقراءة الفاتورة:\n"
-            "1. جدول المبيعات: اقرأ كل سطر (الكمية × سعر الوحدة = القيمة)، واجمع كامل عمود الكمية (عدد الصناديق/السلات).\n"
+            "1. جدول المبيعات: اقرأ كل سطر واجمع كامل عمود الكمية (عدد الصناديق/السلات).\n"
             "2. خانة الإجمالي: مجموع قيم جميع السطور.\n"
             "3. خانة الخصم: عمولة السوق (3% من الإجمالي).\n"
             "4. الرصيد المتبقي (الصافي): الإجمالي - الخصم.\n"
@@ -471,8 +464,7 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
             "BOXES: <مجموع عمود الكمية>\n"
             "GROSS: <الإجمالي العام>\n"
             "DISCOUNT: <مبلغ الخصم>\n"
-            "NET: <الرصيد المتبقي الصافي>\n"
-            "TAFQEET: <النص المكتوب في التفقيط إن وجد>"
+            "NET: <الرصيد المتبقي الصافي>"
         )
 
         chat_completion = groq_client.chat.completions.create(
@@ -498,7 +490,6 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
         raw = chat_completion.choices[0].message.content.strip()
         clean_text = re.sub(r"<think>[\s\S]*?</think>", "", raw).strip() or raw
 
-        # استخراج المتغيرات الأساسية
         boxes = 0.0
         gross = 0.0
         discount = 0.0
@@ -514,40 +505,27 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
         if d_m: discount = float(d_m.group(1).replace(",", ""))
         if n_m: net = float(n_m.group(1).replace(",", ""))
 
-        # -------------------------------------------------------------
-        # محرك التدقيق المحاسبي وسد الخانات الباهتة (وفق القواعد الأربع)
-        # -------------------------------------------------------------
-
-        # 1. إذا توفر الإجمالي والخصم وكان الصافي غير واضح:
+        # تطبيق القواعد الحسابية الأربع لملء أي خانة باهتة
         if gross > 0 and discount > 0 and net == 0:
             net = gross - discount
-
-        # 2. إذا توفر الإجمالي فقط وكان الخصم والصافي باهتين:
         elif gross > 0 and net == 0:
             discount = round(gross * 0.03)
             net = gross - discount
-
-        # 3. إذا توفر الصافي المتبقي وكان الإجمالي غير واضح:
         elif net > 0 and gross == 0:
             gross = round(net / 0.97)
             discount = gross - net
-
-        # 4. إذا كانت نسبة الخصم معروفة وتوفر الإجمالي والصافي، تحقق من صحة المعادلة:
         elif gross > 0 and net > 0 and discount == 0:
             discount = gross - net
 
-        # 5. خطة استرجاع احتياطية للأرقام إذا أرجع النموذج نصاً سردياً:
         if net == 0:
             large_nums = sorted([float(x.replace(",", "")) for x in re.findall(r"\b\d{5,7}\b", clean_text)], reverse=True)
             if len(large_nums) >= 2:
-                # أكبر رقم هو الإجمالي والثاني هو الصافي
                 gross = large_nums[0]
                 net = large_nums[1]
             elif len(large_nums) == 1:
                 gross = large_nums[0]
                 net = round(gross * 0.97)
 
-        # استنتاج الصناديق من النص في حال كانت باهتة
         if boxes == 0:
             small_nums = [float(x) for x in re.findall(r"\b([1-9]|1[0-9]|2[0-9])\b", clean_text) if float(x) != 3.0]
             if small_nums:
@@ -577,7 +555,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     invoice_net = 0.0
     currency = detect_currency(caption)
 
-    # 1. إذا كتبت الأرقام مع وصف الصورة تُعتمد فوراً
+    # 1. إذا كُتبت الأرقام في وصف الصورة
     if len(caption_nums) >= 2:
         boxes = caption_nums[0]
         invoice_net = caption_nums[1]
@@ -1197,7 +1175,7 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         report = get_profit_report()
         await query.message.reply_text(
             f"📈 الأرباح الكاملة:\n"
-            f"⚖️ الإنتاج: {report['production']:,.0f} كجم\n\n"
+            f"⚖️ الإنتاج: {report['production']:,.0f} كجم\n"
             f"🇸🇦 صافي سعودي: {report['sar_profit']:,.0f}\n"
             f"🇾🇪 صافي يمني: {report['yer_profit']:,.0f}"
         )
