@@ -4,9 +4,12 @@ import datetime
 import re
 import uuid
 import json
+import base64
 import threading
 import urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
+
+import requests
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -21,8 +24,6 @@ from telegram.ext import (
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-from google import genai
-from google.genai import types
 from PIL import Image, ImageOps
 
 from reportlab.lib.pagesizes import letter
@@ -40,9 +41,10 @@ from bidi.algorithm import get_display
 # =========================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8943498488:AAFbsQw7oPJqqADrxYdo3k7eC1lZe5jgqm4")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AQ.Ab8RN6JFl6IhAxRaSLSFgNxo8nfi9Ky_mwDtwH1skvp6LdvuTw")
-
-gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+GEMINI_API_KEY = os.getenv(
+    "GEMINI_API_KEY", 
+    "AQ.Ab8RN6JFI6IhAxRaSLSFgNxo8nfi9Ky_mwDtwhH1skvp6LdvuTw"
+)
 
 ADMIN_IDS = [8646384325, 6017996704]
 
@@ -348,10 +350,8 @@ async def notify_admins(context: ContextTypes.DEFAULT_TYPE, message_text: str, s
 
 
 # =========================================================
-# معالجة الفاتورة عبر Gemini Flash
+# معالجة الفاتورة عبر REST API المباشر
 # =========================================================
-
-import requests
 
 def parse_invoice_image(image_bytes: bytes) -> dict:
     try:
@@ -380,7 +380,6 @@ def parse_invoice_image(image_bytes: bytes) -> dict:
 
         url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
         
-        # إرسال المفتاح في x-goog-api-key مباشرة لتجاوز خطأ ACCESS_TOKEN_TYPE_UNSUPPORTED نهائياً
         headers = {
             "Content-Type": "application/json",
             "x-goog-api-key": GEMINI_API_KEY
@@ -447,7 +446,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         boxes = caption_nums[0]
         invoice_net = caption_nums[1]
     else:
-        status_msg = await update.message.reply_text("⏳ جاري قراءة الفاتورة...")
+        status_msg = await update.message.reply_text("⏳ جاري تدقيق الفاتورة...")
         try:
             photo_file = await update.message.photo[-1].get_file()
             photo_bytes = await photo_file.download_as_bytearray()
@@ -997,5 +996,8 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print("Cucumber Bot is running 24/7...")
+    print("=" * 50)
+    print("🤖 بوت إدارة مشروع المحمية جاهز ويعمل الآن")
+    print("=" * 50)
+
     app.run_polling(drop_pending_updates=True)
