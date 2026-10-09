@@ -47,7 +47,6 @@ SPREADSHEET_URL = (
 CREDENTIALS_FILE = "credentials.json"
 SHEET_NAME = "Sheet1"
 
-# حالات المحادثة التفاعلية لإضافة الفاتورة
 WAIT_BOXES, WAIT_NET, WAIT_PHOTO = range(3)
 
 
@@ -132,7 +131,7 @@ def init_google_sheet():
         )
         client = gspread.authorize(creds)
         spreadsheet = client.open_by_url(SPREADSHEET_URL)
-        
+
         try:
             sheet = spreadsheet.worksheet(SHEET_NAME)
         except gspread.WorksheetNotFound:
@@ -143,7 +142,7 @@ def init_google_sheet():
             sheet.append_row(HEADERS)
         elif first_row[:len(HEADERS)] != HEADERS:
             sheet.update(range_name="A1:K1", values=[HEADERS])
-            
+
         print("Connected to Google Sheets successfully!")
     except Exception as e:
         print(f"CRITICAL GOOGLE SHEETS ERROR: {e}")
@@ -310,7 +309,6 @@ def analyze_message(text):
     currency = detect_currency(text)
     quantity = extract_quantity(text)
 
-    # التحقق من الرصيد الأولي / الافتتاحي
     if any(k in lower_text for k in ["رصيد اولي", "رصيد أولي", "رصيد افتتاحي", "مبلغ اولي", "مبلغ أولي", "عهدة"]):
         amount = extract_amount(text)
         return {
@@ -536,11 +534,10 @@ async def handle_initial_command(update: Update, context: ContextTypes.DEFAULT_T
 
 async def handle_exchange(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
     norm_text = convert_arabic_numbers(text).lower()
-    
-    # 1. فحص التحويل العكسي: من يمني إلى سعودي (شراء سعودي باليمني)
+
     pattern_to_sar = r"^صرف\s+(\d+(?:\.\d+)?)\s*(?:يمني|ريال يمني|ر\.ي|ري)?\s*بسعر\s*(\d+(?:\.\d+)?)"
     match_to_sar = re.search(pattern_to_sar, norm_text)
-    
+
     is_to_sar = False
     if match_to_sar and any(w in norm_text for w in ["يمني", "ر.ي", "ري"]):
         is_to_sar = True
@@ -550,12 +547,11 @@ async def handle_exchange(update: Update, context: ContextTypes.DEFAULT_TYPE, te
             return False
         sar_amount = round(yer_amount / rate, 2)
     else:
-        # 2. التحويل الافتراضي: من سعودي إلى يمني
         pattern_to_yer = r"^صرف\s+(\d+(?:\.\d+)?)\s*(?:سعودي|ر\.س|رس)?\s*بسعر\s*(\d+(?:\.\d+)?)"
         match_to_yer = re.search(pattern_to_yer, norm_text)
         if not match_to_yer:
             return False
-        
+
         sar_amount = float(match_to_yer.group(1))
         rate = float(match_to_yer.group(2))
         yer_amount = round(sar_amount * rate, 2)
@@ -566,7 +562,6 @@ async def handle_exchange(update: Update, context: ContextTypes.DEFAULT_TYPE, te
     user_name = update.effective_user.first_name or "حسام"
 
     if is_to_sar:
-        # خصم يمني وإضافة سعودي
         new_yer_balance = balances["ريال يمني"] - yer_amount
         new_sar_balance = balances["ريال سعودي"] + sar_amount
 
@@ -598,7 +593,6 @@ async def handle_exchange(update: Update, context: ContextTypes.DEFAULT_TYPE, te
             f"🇸🇦 رصيد سعودي: *{new_sar_balance:,.2f}* ر.س"
         )
     else:
-        # خصم سعودي وإضافة يمني
         new_sar_balance = balances["ريال سعودي"] - sar_amount
         new_yer_balance = balances["ريال يمني"] + yer_amount
 
@@ -634,7 +628,6 @@ async def handle_exchange(update: Update, context: ContextTypes.DEFAULT_TYPE, te
     await notify_admins(context, reply, update.effective_chat.id)
 
     return True
-
 
 
 # =========================================================
@@ -801,7 +794,7 @@ def generate_pdf_report():
         spaceAfter=15,
         textColor=colors.HexColor("#1b5e20")
     )
-    
+
     normal_style = ParagraphStyle(
         name='NormalStyle',
         fontName=DEFAULT_FONT,
@@ -1022,40 +1015,33 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception as e:
             await query.message.reply_text(f"❌ خطأ أثناء إنشاء التقرير: {e}")
-elif data == "cmd_undo":
+    elif data == "cmd_undo":
         if not sheet:
-            await query.message.reply_text("⚠️ لم يتم الاتصال بقوقل شيت.")
+            await query.message.reply_text("⚠️ لم يتم الاتصال بالشيت بعد")
             return
 
         try:
             records = sheet.get_all_values()
-            
-            # فحص إذا كان الجدول فارغاً أو يحتوي فقط على صف العناوين
             if len(records) <= 1:
-                await query.message.reply_text("⚠️ لا توجد عمليات مسجلة لحذفها.")
+                await query.message.reply_text("⚠️ لا توجد عمليات مسجلة لحذفها")
                 return
 
-            # تحديد رقم الصف الأخير الفعلي
             last_row_index = len(records)
-            last_row_data = records[-1]
-
-            # تنفيذ الحذف
+            last_row = records[-1]
             sheet.delete_rows(last_row_index)
 
-            # إرسال تأكيد الحذف
             reply = (
                 f"🔄 *تم حذف آخر عملية بنجاح:*\n"
                 f"━━━━━━━━━━━━━━━\n"
-                f"🏷️ النوع: *{last_row_data[1]}*\n"
-                f"💰 المبلغ: *{last_row_data[4]} {last_row_data[5]}*\n"
-                f"📋 البيان: *{last_row_data[3]}*"
+                f"🏷️ النوع: *{last_row[1]}*\n"
+                f"💰 المبلغ: *{last_row[4]} {last_row[5]}*\n"
+                f"📋 البيان: *{last_row[3]}*"
             )
             await query.message.reply_text(reply, parse_mode="Markdown")
             await notify_admins(context, reply, update.effective_chat.id)
-
         except Exception as e:
-            print(f"Error in cmd_undo: {e}")
-            await query.message.reply_text(f"❌ حدث خطأ أثناء تنفيذ الحذف: {e}")
+            print(f"Error in delete_rows: {e}")
+            await query.message.reply_text(f"❌ حدث خطأ أثناء الحذف: {e}")
     elif data == "ui_prod":
         await query.message.reply_text("⚖️ *لتسجيل الإنتاج:* أرسل رسالة بالكمية مباشرة مثل:\n`إنتاج اليوم 750 كيلو` أو `حصاد 500 كجم`", parse_mode="Markdown")
     elif data == "ui_labor":
@@ -1108,6 +1094,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw_text = update.message.text.strip()
     if not raw_text:
         return
+
+    # التراجع / حذف آخر عملية عبر الرسائل النصية
+    if any(k in raw_text for k in ["حذف اخر عمليه", "حذف آخر عملية", "تراجع", "احذف اخر عمليه", "احذف آخر عملية"]):
+        if not sheet:
+            await update.message.reply_text("⚠️ لم يتم الاتصال بالشيت بعد")
+            return
+        try:
+            records = sheet.get_all_values()
+            total_rows = len(records)
+            if total_rows <= 1:
+                await update.message.reply_text("⚠️ لا توجد عمليات مسجلة لحذفها.")
+                return
+
+            last_row = records[-1]
+            sheet.delete_rows(total_rows)
+
+            reply = (
+                f"🔄 *تم حذف آخر عملية بنجاح:*\n"
+                f"━━━━━━━━━━━━━━━\n"
+                f"🏷️ النوع: *{last_row[1]}*\n"
+                f"💰 المبلغ: *{last_row[4]} {last_row[5]}*\n"
+                f"📋 البيان: *{last_row[3]}*"
+            )
+            await update.message.reply_text(reply, parse_mode="Markdown")
+            await notify_admins(context, reply, update.effective_chat.id)
+            return
+        except Exception as e:
+            await update.message.reply_text(f"❌ فشل الحذف: {e}")
+            return
 
     # صرافة
     if raw_text.startswith("صرف"):
