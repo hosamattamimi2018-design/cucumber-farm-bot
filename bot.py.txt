@@ -1022,23 +1022,40 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception as e:
             await query.message.reply_text(f"❌ خطأ أثناء إنشاء التقرير: {e}")
-    elif data == "cmd_undo":
+elif data == "cmd_undo":
         if not sheet:
-            await query.message.reply_text("⚠️ لم يتم الاتصال بالشيت بعد")
+            await query.message.reply_text("⚠️ لم يتم الاتصال بقوقل شيت.")
             return
-        records = sheet.get_all_values()
-        if len(records) <= 1:
-            await query.message.reply_text("⚠️ لا توجد عمليات مسجلة لحذفها")
-            return
-        last_row = records[-1]
-        sheet.delete_rows(len(records))
-        reply = (
-            f"🔄 *تم حذف آخر عملية بنجاح:*\n"
-            f"النوع: {last_row[1]} | المبلغ: {last_row[4]} {last_row[5]}\n"
-            f"البيان: {last_row[3]}"
-        )
-        await query.message.reply_text(reply, parse_mode="Markdown")
-        await notify_admins(context, reply, update.effective_chat.id)
+
+        try:
+            records = sheet.get_all_values()
+            
+            # فحص إذا كان الجدول فارغاً أو يحتوي فقط على صف العناوين
+            if len(records) <= 1:
+                await query.message.reply_text("⚠️ لا توجد عمليات مسجلة لحذفها.")
+                return
+
+            # تحديد رقم الصف الأخير الفعلي
+            last_row_index = len(records)
+            last_row_data = records[-1]
+
+            # تنفيذ الحذف
+            sheet.delete_rows(last_row_index)
+
+            # إرسال تأكيد الحذف
+            reply = (
+                f"🔄 *تم حذف آخر عملية بنجاح:*\n"
+                f"━━━━━━━━━━━━━━━\n"
+                f"🏷️ النوع: *{last_row_data[1]}*\n"
+                f"💰 المبلغ: *{last_row_data[4]} {last_row_data[5]}*\n"
+                f"📋 البيان: *{last_row_data[3]}*"
+            )
+            await query.message.reply_text(reply, parse_mode="Markdown")
+            await notify_admins(context, reply, update.effective_chat.id)
+
+        except Exception as e:
+            print(f"Error in cmd_undo: {e}")
+            await query.message.reply_text(f"❌ حدث خطأ أثناء تنفيذ الحذف: {e}")
     elif data == "ui_prod":
         await query.message.reply_text("⚖️ *لتسجيل الإنتاج:* أرسل رسالة بالكمية مباشرة مثل:\n`إنتاج اليوم 750 كيلو` أو `حصاد 500 كجم`", parse_mode="Markdown")
     elif data == "ui_labor":
