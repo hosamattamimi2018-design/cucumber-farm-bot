@@ -36,7 +36,7 @@ from bidi.algorithm import get_display
 # الإعدادات
 # =========================================================
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8943498488:AAFbsQw7oPJqqADrxYdo3k7eC1lZe5jgqm4")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8943498488:AAHoa9lA4Hw_WW614E0ub235SNl4pSnvUnw")
 ADMIN_IDS = [8646384325, 6017996704]
 
 SPREADSHEET_URL = (
